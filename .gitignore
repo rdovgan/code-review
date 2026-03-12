@@ -31,3 +31,10 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Project secrets ###
+.env
+config/credentials.yml
+__pycache__/
+*.pyc
+.pytest_cache/

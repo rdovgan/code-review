@@ -5,7 +5,8 @@
       "Bash(pip install:*)",
       "Bash(python -m pytest tests/test_adapters.py tests/test_merger.py -v --tb=short 2>&1)",
       "Bash(python -m pytest tests/test_analyzers.py tests/test_worker.py -v --tb=short -m \"not integration\" 2>&1)",
-      "Bash(python -m pytest tests/ -v --tb=short -m \"not integration\" 2>&1)"
+      "Bash(python -m pytest tests/ -v --tb=short -m \"not integration\" 2>&1)",
+      "Bash(ls /Users/rdovgan/Desktop/projects/work/code-review/*.md)"
     ]
   }
 }

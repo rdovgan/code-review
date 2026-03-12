@@ -2,27 +2,18 @@ import hashlib
 import hmac
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from app.adapters.base import hmac_verify
 from app.adapters.bitbucket import BitbucketAdapter
-from app.config.settings import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _make_settings(**kwargs) -> Settings:
-    defaults = dict(
-        ANTHROPIC_API_KEY="test",
-        REDIS_URL="redis://localhost:6379/0",
-        BITBUCKET_WEBHOOK_SECRET="mysecret",
-        BITBUCKET_USERNAME="user",
-        BITBUCKET_APP_PASSWORD="pass",
-    )
-    defaults.update(kwargs)
-    return Settings(**defaults)
+def _make_adapter(secret: str = "mysecret") -> BitbucketAdapter:
+    return BitbucketAdapter(username="user", app_password="pass", webhook_secret=secret)
 
 
 def _sign(secret: str, body: bytes) -> str:
@@ -44,16 +35,14 @@ def test_bitbucket_hmac_invalid():
 
 
 def test_bitbucket_validate_webhook_valid():
-    settings = _make_settings()
-    adapter = BitbucketAdapter(settings)
+    adapter = _make_adapter()
     body = b'{"event": "pullrequest:created"}'
     sig = _sign("mysecret", body)
     assert adapter.validate_webhook(body, {"x-hub-signature": sig}) is True
 
 
 def test_bitbucket_validate_webhook_invalid():
-    settings = _make_settings()
-    adapter = BitbucketAdapter(settings)
+    adapter = _make_adapter()
     body = b'{"event": "pullrequest:created"}'
     tampered = b'{"event": "something else"}'
     sig = _sign("mysecret", body)
@@ -61,8 +50,7 @@ def test_bitbucket_validate_webhook_invalid():
 
 
 def test_bitbucket_parse_created():
-    settings = _make_settings()
-    adapter = BitbucketAdapter(settings)
+    adapter = _make_adapter()
     payload = json.loads((FIXTURES / "bitbucket_payload.json").read_text())
     ctx = adapter.parse_webhook(payload)
     assert ctx is not None
@@ -76,9 +64,7 @@ def test_bitbucket_parse_created():
 
 
 def test_bitbucket_parse_ignored_event():
-    settings = _make_settings()
-    adapter = BitbucketAdapter(settings)
-    # Payload without a "pullrequest" key → should return None
+    adapter = _make_adapter()
     payload = {"event": "repo:push", "repository": {"full_name": "workspace/repo"}}
     ctx = adapter.parse_webhook(payload)
     assert ctx is None

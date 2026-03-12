@@ -1,3 +1,4 @@
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -70,15 +71,39 @@ async def health():
     return {"status": "ok", "redis": redis_status}
 
 
+def _extract_workspace(payload: dict) -> str:
+    """Extract the Bitbucket workspace slug from a webhook payload."""
+    full_name = (
+        payload.get("pullrequest", {})
+        .get("destination", {})
+        .get("repository", {})
+        .get("full_name", "")
+    )
+    return full_name.split("/")[0] if "/" in full_name else ""
+
+
 @app.post("/webhook/bitbucket")
 async def webhook_bitbucket(request: Request):
     body = await request.body()
-    adapter = get_adapter("bitbucket", settings)
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    workspace = _extract_workspace(payload)
+    if not workspace:
+        return JSONResponse(status_code=200, content={"status": "ignored"})
+
+    try:
+        adapter = get_adapter("bitbucket", workspace, settings)
+    except ValueError as exc:
+        logger.warning("no_credentials", workspace=workspace, error=str(exc))
+        return JSONResponse(status_code=400, content={"error": str(exc)})
 
     if not adapter.validate_webhook(body, dict(request.headers)):
         return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
-    payload = await request.json()
     pr_context = adapter.parse_webhook(payload)
     if pr_context is None:
         return JSONResponse(status_code=200, content={"status": "ignored"})

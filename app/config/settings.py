@@ -10,9 +10,6 @@ class Settings(BaseSettings):
     AI_MAX_TOKENS: int = 4096
     AI_MAX_DIFF_TOKENS: int = 8000
     REDIS_URL: str = "redis://localhost:6379/0"
-    BITBUCKET_WEBHOOK_SECRET: str = ""
-    BITBUCKET_USERNAME: str = ""
-    BITBUCKET_APP_PASSWORD: str = ""
     MAX_DIFF_LINES: int = 500
 
 

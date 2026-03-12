@@ -4,7 +4,6 @@ from typing import Optional
 import httpx
 
 from app.adapters.base import BOT_MARKER, GitPlatform, hmac_verify
-from app.config.settings import Settings
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -13,10 +12,10 @@ BITBUCKET_API = "https://api.bitbucket.org"
 
 
 class BitbucketAdapter(GitPlatform):
-    def __init__(self, settings: Settings) -> None:
-        self._secret = settings.BITBUCKET_WEBHOOK_SECRET
+    def __init__(self, username: str, app_password: str, webhook_secret: str) -> None:
+        self._secret = webhook_secret
         self._client = httpx.Client(
-            auth=(settings.BITBUCKET_USERNAME, settings.BITBUCKET_APP_PASSWORD),
+            auth=(username, app_password),
             timeout=30,
         )
 

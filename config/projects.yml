@@ -5,8 +5,11 @@
 # If the repo also has a .codereview.yml, its values OVERRIDE these.
 # If a field is omitted, the system default applies.
 #
-# To add a new project: copy any block below and change the repo key + settings.
-# Restart is NOT required — the file is read on every review task.
+# Credentials (username, app_password, webhook_secret) are stored per-workspace
+# in config/credentials.yml — not here.
+#
+# To add a new project: copy any block below, change the repo key + settings,
+# then add a webhook in Bitbucket. No restart required.
 
 projects:
 

@@ -1,0 +1,89 @@
+# Central project registry for the Code Review Bot
+#
+# Each key under "projects" is a Bitbucket repo full name: workspace/repository-slug
+# Settings here are the BASE config for that project.
+# If the repo also has a .codereview.yml, its values OVERRIDE these.
+# If a field is omitted, the system default applies.
+#
+# To add a new project: copy any block below and change the repo key + settings.
+# Restart is NOT required — the file is read on every review task.
+
+projects:
+
+  # ── Example: Java backend ──────────────────────────────────────────────────
+  myworkspace/my-java-api:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 500
+    ignore_paths:
+      - "migrations/*"
+      - "**/*.generated.java"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+    ai_focus:
+      - security
+      - bugs
+
+  # ── Example: React / TypeScript frontend ───────────────────────────────────
+  myworkspace/my-react-frontend:
+    language: js
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 400
+    ignore_paths:
+      - "dist/*"
+      - "build/*"
+      - "**/*.min.js"
+      - "node_modules/*"
+    semgrep_rules:
+      - owasp
+      - p/javascript
+    ai_focus:
+      - security
+      - bugs
+
+  # ── Example: C# / .NET service ─────────────────────────────────────────────
+  myworkspace/my-dotnet-service:
+    language: dotnet
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+      - BUG
+    max_diff_lines: 600
+    ignore_paths:
+      - "**/*.Designer.cs"
+      - "**/Migrations/*"
+      - "**/*.g.cs"
+    semgrep_rules:
+      - owasp
+      - p/csharp
+    ai_focus:
+      - security
+      - bugs
+
+  # ── Example: PHP application ───────────────────────────────────────────────
+  myworkspace/my-php-app:
+    language: php
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 500
+    ignore_paths:
+      - "vendor/*"
+      - "storage/*"
+      - "bootstrap/cache/*"
+    semgrep_rules:
+      - owasp
+      - p/php
+    ai_focus:
+      - security
+      - bugs

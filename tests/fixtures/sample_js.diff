@@ -1,0 +1,24 @@
+diff --git a/src/utils/dataProcessor.js b/src/utils/dataProcessor.js
+index 1111111..2222222 100644
+--- a/src/utils/dataProcessor.js
++++ b/src/utils/dataProcessor.js
+@@ -1,5 +1,25 @@
++'use strict';
++
++// CRITICAL: eval with user input
++function processTemplate(userInput) {
++    return eval(userInput);
++}
++
++// BUG: missing await on async call
++async function fetchUserData(userId) {
++    const data = getUserFromDb(userId);  // missing await
++    return data.name;
++}
++
++// SUGGEST: console.log left in code
++function calculateTotal(items) {
++    const total = items.reduce((sum, item) => sum + item.price, 0);
++    console.log('Total calculated:', total);
++    return total;
++}

@@ -1,0 +1,36 @@
+{
+  "actor": {
+    "display_name": "Jane Developer",
+    "nickname": "janedev",
+    "uuid": "{abc123}"
+  },
+  "pullrequest": {
+    "id": 42,
+    "title": "Add user authentication feature",
+    "state": "OPEN",
+    "source": {
+      "branch": {"name": "feature/auth"},
+      "commit": {"hash": "abc123def456"},
+      "repository": {"full_name": "myworkspace/myrepo"}
+    },
+    "destination": {
+      "branch": {"name": "main"},
+      "commit": {"hash": "deadbeef1234"},
+      "repository": {"full_name": "myworkspace/myrepo"}
+    },
+    "author": {
+      "display_name": "Jane Developer",
+      "nickname": "janedev"
+    },
+    "created_on": "2026-03-12T10:00:00.000000+00:00",
+    "updated_on": "2026-03-12T10:05:00.000000+00:00",
+    "links": {
+      "self": {"href": "https://api.bitbucket.org/2.0/repositories/myworkspace/myrepo/pullrequests/42"}
+    }
+  },
+  "repository": {
+    "full_name": "myworkspace/myrepo",
+    "name": "myrepo",
+    "scm": "git"
+  }
+}

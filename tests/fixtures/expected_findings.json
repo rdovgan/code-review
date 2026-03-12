@@ -1,0 +1,38 @@
+[
+  {
+    "severity": "CRITICAL",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 13,
+    "message": "SQL injection via Statement.execute with string concatenation of user input",
+    "suggestion": "Use PreparedStatement with parameterized queries instead",
+    "source": "ai",
+    "rule_id": null
+  },
+  {
+    "severity": "BUG",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 19,
+    "message": "Unguarded method chain risks NullPointerException",
+    "suggestion": "Add null checks or use Optional.ofNullable()",
+    "source": "ai",
+    "rule_id": null
+  },
+  {
+    "severity": "PERFORMANCE",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 24,
+    "message": "String concatenation inside loop creates excessive object allocation",
+    "suggestion": "Use StringBuilder instead",
+    "source": "ai",
+    "rule_id": null
+  },
+  {
+    "severity": "SUGGEST",
+    "file": "src/main/java/com/example/UserService.java",
+    "line": 31,
+    "message": "Method named calcAge is ambiguous; prefer calculateAge or getAge",
+    "suggestion": "Rename to calculateAge following Java naming conventions",
+    "source": "ai",
+    "rule_id": null
+  }
+]

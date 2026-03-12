@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/rdovgan/Desktop/projects/work/code-review -type f -name \"*.py\" -o -name \"*.yaml\" -o -name \"*.yml\" -o -name \"*.md\" -o -name \"Dockerfile\" -o -name \"docker-compose*\" 2>/dev/null | grep -v \".git\" | grep -v \".idea\")",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest tests/test_adapters.py tests/test_merger.py -v --tb=short 2>&1)",
+      "Bash(python -m pytest tests/test_analyzers.py tests/test_worker.py -v --tb=short -m \"not integration\" 2>&1)",
+      "Bash(python -m pytest tests/ -v --tb=short -m \"not integration\" 2>&1)"
+    ]
+  }
+}

@@ -73,7 +73,7 @@ Each Bitbucket organization (workspace) has its own credentials in `config/crede
 openssl rand -hex 32
 ```
 
-**Add the workspace to `config/credentials.yml` on the VPS:**
+**Add the workspace and repository to `config/credentials.yml` on the VPS:**
 ```bash
 nano ~/code-review/config/credentials.yml
 ```
@@ -84,9 +84,14 @@ bitbucket:
 
     myworkspace:                          # Bitbucket workspace slug
       username: alice                     # Bitbucket account username
-      app_password: ATBBxxxxxxxxxxxx      # App password with PR read/write
-      webhook_secret: aabbccdd...         # Secret used when registering the webhook
+      app_password: ATBBxxxxxxxxxxxx      # App password (one per workspace)
+      repositories:
+        my-service:                       # repository slug
+          webhook_secret: aabbccdd...     # unique per repo (openssl rand -hex 32)
 ```
+
+`username` and `app_password` are workspace-level — shared by all repos in that org.
+`webhook_secret` is per-repository — matches the secret set in each Bitbucket webhook.
 
 No restart needed — credentials are read on every request.
 

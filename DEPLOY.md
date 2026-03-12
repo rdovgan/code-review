@@ -102,31 +102,37 @@ nano config/credentials.yml
 chmod 600 config/credentials.yml
 ```
 
-Add one block per Bitbucket workspace:
+**How to create a Bitbucket App Password** (one per workspace/organization):
+1. Bitbucket → Personal Settings → App passwords → Create app password
+2. Label: `code-review-bot`
+3. Permissions: **Repositories: Read** | **Pull requests: Read, Write**
+
+Generate a webhook secret for each repository:
+```bash
+openssl rand -hex 32
+```
+
+Structure: workspace holds `username` + `app_password`; each repository holds its own `webhook_secret`.
 
 ```yaml
 bitbucket:
   workspaces:
 
-    first-workspace:
-      username: alice
-      app_password: ATBBxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-      webhook_secret: <output of: openssl rand -hex 32>
+    first-workspace:                         # Bitbucket workspace slug
+      username: alice                        # Bitbucket account username
+      app_password: ATBBxxxxxxxxxxxx         # App password (workspace-level)
+      repositories:
+        backend-api:                         # repository slug
+          webhook_secret: aabbccdd...        # unique per repo (openssl rand -hex 32)
+        frontend-app:
+          webhook_secret: 11223344...
 
     second-workspace:
       username: bob
-      app_password: ATBByyyyyyyyyyyyyyyyyyyyyyyyyyyy
-      webhook_secret: <output of: openssl rand -hex 32>
-```
-
-**How to create a Bitbucket App Password:**
-1. Bitbucket → Personal Settings → App passwords → Create app password
-2. Label: `code-review-bot`
-3. Permissions: **Repositories: Read** | **Pull requests: Read, Write**
-
-Generate a webhook secret for each workspace:
-```bash
-openssl rand -hex 32
+      app_password: ATBByyyyyyyyyyyy
+      repositories:
+        mobile-app:
+          webhook_secret: deadbeef...
 ```
 
 No bot restart is needed when editing this file — credentials are read on every request.

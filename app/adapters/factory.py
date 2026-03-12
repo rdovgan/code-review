@@ -1,12 +1,12 @@
 from app.adapters.base import GitPlatform
 from app.adapters.bitbucket import BitbucketAdapter
-from app.config.credentials import get_workspace_credentials
+from app.config.credentials import get_credentials
 from app.config.settings import Settings
 
 
-def get_adapter(platform: str, workspace: str, settings: Settings) -> GitPlatform:
+def get_adapter(platform: str, workspace: str, repo_slug: str, settings: Settings) -> GitPlatform:
     if platform == "bitbucket":
-        creds = get_workspace_credentials("bitbucket", workspace)
+        creds = get_credentials("bitbucket", workspace, repo_slug)
         return BitbucketAdapter(
             username=creds["username"],
             app_password=creds["app_password"],

@@ -71,15 +71,16 @@ async def health():
     return {"status": "ok", "redis": redis_status}
 
 
-def _extract_workspace(payload: dict) -> str:
-    """Extract the Bitbucket workspace slug from a webhook payload."""
+def _extract_repo_info(payload: dict) -> tuple[str, str]:
+    """Return (workspace, repo_slug) from a Bitbucket webhook payload."""
     full_name = (
         payload.get("pullrequest", {})
         .get("destination", {})
         .get("repository", {})
         .get("full_name", "")
     )
-    return full_name.split("/")[0] if "/" in full_name else ""
+    parts = full_name.split("/", 1)
+    return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
 
 
 @app.post("/webhook/bitbucket")
@@ -91,14 +92,14 @@ async def webhook_bitbucket(request: Request):
     except json.JSONDecodeError:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
-    workspace = _extract_workspace(payload)
-    if not workspace:
+    workspace, repo_slug = _extract_repo_info(payload)
+    if not workspace or not repo_slug:
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
     try:
-        adapter = get_adapter("bitbucket", workspace, settings)
+        adapter = get_adapter("bitbucket", workspace, repo_slug, settings)
     except ValueError as exc:
-        logger.warning("no_credentials", workspace=workspace, error=str(exc))
+        logger.warning("no_credentials", workspace=workspace, repo=repo_slug, error=str(exc))
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     if not adapter.validate_webhook(body, dict(request.headers)):

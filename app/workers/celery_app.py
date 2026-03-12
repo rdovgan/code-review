@@ -53,8 +53,8 @@ def process_review(self, task_payload: dict) -> dict:
     diff = task_payload.pop("diff", "")
     pr_context = PRContext(platform=platform, diff=diff, **task_payload)
 
-    workspace = pr_context.repo_full_name.split("/")[0]
-    adapter = get_adapter(platform, workspace, settings)
+    workspace, repo_slug = pr_context.repo_full_name.split("/", 1)
+    adapter = get_adapter(platform, workspace, repo_slug, settings)
 
     if not pr_context.diff:
         pr_context.diff = adapter.get_diff(pr_context)

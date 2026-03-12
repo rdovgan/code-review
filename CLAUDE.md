@@ -1,17 +1,67 @@
-# Code Review Bot — Developer Guide
+# Code Review Bot — Developer Reference
 
-## Architecture Overview
+## Architecture
 
 ```
-Webhook → FastAPI (main.py) → Celery Task (workers/celery_app.py)
-                                      ↓
-                          ThreadPoolExecutor (2 workers)
-                          ├── SemgrepRunner (semgrep_runner.py)
-                          └── AIReviewer    (ai_reviewer.py)
-                                      ↓
-                              merger.py (dedup + sort)
-                                      ↓
-                          GitPlatform adapter (post comments)
+Git Platform (Bitbucket / GitHub / GitLab)
+        │  webhook POST (PR opened / updated)
+        ▼
+   Nginx (TLS termination)
+        │
+        ▼
+   FastAPI  app/main.py
+        │  HMAC validate → Celery task
+        ▼
+   Celery Worker  app/workers/celery_app.py
+        │
+   ┌────┴───────────────────┐
+   ▼                        ▼
+SemgrepRunner          AIReviewer
+app/analyzers/         app/analyzers/
+semgrep_runner.py      ai_reviewer.py
+   │                        │
+   └──────────┬─────────────┘
+              │  merge + dedup + sort by severity
+              ▼           app/analyzers/merger.py
+   GitPlatform adapter
+   (post inline comments + summary + build status)
+```
+
+## Project Structure
+
+```
+app/
+├── main.py                   # FastAPI: webhook routes + /health
+├── models.py                 # Finding, PRContext, ReviewConfig, Severity
+├── adapters/
+│   ├── base.py               # GitPlatform ABC + hmac_verify() + BOT_MARKER
+│   ├── bitbucket.py          # Bitbucket Cloud adapter (httpx)
+│   └── factory.py            # get_adapter(platform, settings)
+├── analyzers/
+│   ├── semgrep_runner.py     # Semgrep subprocess wrapper
+│   ├── ai_reviewer.py        # Anthropic SDK, prompt loading, JSON parsing
+│   └── merger.py             # dedup (sha256 key) + severity sort
+├── workers/
+│   └── celery_app.py         # process_review task, ThreadPoolExecutor
+└── config/
+    ├── settings.py           # pydantic-settings, @lru_cache singleton
+    └── project_config.py     # load config/projects.yml + .codereview.yml
+
+config/
+└── projects.yml              # central per-project settings registry
+
+prompts/
+├── java_prompt.md
+├── dotnet_prompt.md
+├── php_prompt.md
+└── js_prompt.md
+
+tests/
+├── test_adapters.py
+├── test_analyzers.py
+├── test_merger.py
+├── test_worker.py
+└── fixtures/
 ```
 
 ## Dev Commands
@@ -20,66 +70,62 @@ Webhook → FastAPI (main.py) → Celery Task (workers/celery_app.py)
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the API server
+# Run the API server locally
 uvicorn app.main:app --reload
 
-# Run a Celery worker
+# Run a Celery worker locally
 celery -A app.workers.celery_app worker --loglevel=info
 
-# Run unit tests
+# Unit tests (no semgrep required)
 pytest tests/ -m "not integration"
 
-# Run all tests including integration (requires semgrep)
+# All tests including integration (requires semgrep installed)
 pytest tests/
 
-# Docker (full stack)
+# Full stack via Docker
 docker compose up --build
 ```
 
-## Adding a New Git Platform Adapter
+## How to Add a New Git Platform Adapter
 
-1. Create `app/adapters/<platform>.py`
-2. Implement all abstract methods from `GitPlatform` in `app/adapters/base.py`
-3. Add to `get_adapter()` in `app/adapters/factory.py`
-4. Add a new webhook route in `app/main.py`
-5. Add tests in `tests/test_adapters.py`
+1. Create `app/adapters/<platform>.py`, implement all abstract methods from `GitPlatform` in `base.py`
+2. Register it in `get_adapter()` in `app/adapters/factory.py`
+3. Add `POST /webhook/<platform>` route in `app/main.py`
+4. Add tests in `tests/test_adapters.py`
+5. Document the webhook setup in `PROJECTS.md`
 
-## Adding a New Language
+## How to Add a New Language
 
-1. Create `prompts/<language>_prompt.md` with severity examples specific to that language
+1. Create `prompts/<language>_prompt.md` — include language-specific CRITICAL/BUG examples
 2. Add extension mappings to `_EXT_TO_LANG` in `app/config/project_config.py`
-3. Add Semgrep rule mapping to `SEMGREP_RULE_MAP` in `app/analyzers/semgrep_runner.py` if applicable
-
-## Project Config (.codereview.yml)
-
-Place in the root of any repository to customize review behavior:
-
-```yaml
-language: java          # auto-detect if omitted
-ai_review: true
-static_analysis: true
-block_merge_on:
-  - CRITICAL
-max_diff_lines: 500
-slack_channel: "#code-review"
-ignore_paths:
-  - "migrations/*"
-  - "*.generated.*"
-semgrep_rules:
-  - owasp
-  - security-audit
-ai_focus:
-  - security
-  - bugs
-```
+3. Add a Semgrep rule mapping to `SEMGREP_RULE_MAP` in `app/analyzers/semgrep_runner.py`
+4. Add a quick-reference config block in `PROJECTS.md`
 
 ## Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| `Finding.dedup_key` via sha256 | Single dedup mechanism; Semgrep findings win ties |
-| Prompt files as `.md` | Prompt tuning without code deploys |
-| `ThreadPoolExecutor` in Celery | Semgrep is subprocess, Anthropic SDK is sync |
-| `task_acks_late=True` | Prevents data loss on worker crash |
-| `HTTP 202` from webhook handler | Guarantees <1 sec webhook response |
-| `BOT_MARKER` in every comment | Platform-agnostic comment cleanup on re-review |
+| `Finding.dedup_key` via sha256 | Single dedup mechanism; Semgrep findings win ties (inserted first) |
+| Prompt files as `.md`, not hardcoded | Prompt tuning without code deploys or restarts |
+| `ThreadPoolExecutor` in Celery | Semgrep is subprocess, Anthropic SDK is sync — asyncio adds complexity with no benefit |
+| `task_acks_late=True` | Message stays in queue until task completes — prevents data loss on worker crash |
+| `worker_prefetch_multiplier=1` | Semgrep is CPU-heavy; one task per worker prevents resource contention |
+| `HTTP 202` from webhook handler | Never wait for analysis — guarantees <1 sec webhook response |
+| `BOT_MARKER` in every comment | Platform-agnostic way to find own comments for cleanup on re-review |
+| Central `config/projects.yml` | Onboard projects without touching their codebase; `.codereview.yml` in repo can override |
+| Graceful analyzer failures | If Semgrep or AI fails, task continues with the other's results |
+
+## Roadmap
+
+### Phase 3
+- [ ] GitHub adapter (`app/adapters/github.py`)
+- [ ] GitLab adapter (`app/adapters/gitlab.py`)
+- [ ] MySQL persistence (findings history, per-repo config storage)
+- [ ] Slack notifications (`slack_channel` in `ReviewConfig` already wired)
+- [ ] Grafana dashboard + metrics endpoint
+
+### Phase 4
+- [ ] Web UI for review history
+- [ ] Per-author statistics
+- [ ] Rate limiting + AI API budget alerts
+- [ ] Multi-tenant support

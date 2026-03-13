@@ -3,6 +3,7 @@ import json
 import logging
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from app.adapters.base import GitPlatform
@@ -40,7 +41,9 @@ class SemgrepRunner:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             written: list[str] = []
-            for rel_path in filtered_files:
+            for i, rel_path in enumerate(filtered_files):
+                if i > 0:
+                    time.sleep(0.3)  # avoid Bitbucket rate limiting on bulk file fetches
                 content = adapter.get_file_content(pr_context, rel_path, pr_context.head_sha)
                 if content is None:
                     continue

@@ -141,6 +141,7 @@ class BitbucketAdapter(GitPlatform):
             "key": "code-review-bot",
             "name": "AI Code Review",
             "description": description,
+            "url": f"https://bitbucket.org/{workspace}/{repo}/pull-requests/{pr_context.pr_id}",
         }
         resp = self._client.post(url, json=payload)
         return resp.status_code in (200, 201)

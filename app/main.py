@@ -105,6 +105,10 @@ async def webhook_bitbucket(request: Request):
     if not adapter.validate_webhook(body, dict(request.headers)):
         return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
+    event_key = request.headers.get("x-event-key", "")
+    if event_key and event_key not in ("pullrequest:created", "pullrequest:updated", "pullrequest:comment_created"):
+        return JSONResponse(status_code=200, content={"status": "ignored", "reason": "event_not_reviewable"})
+
     pr_context = adapter.parse_webhook(payload)
     if pr_context is None:
         return JSONResponse(status_code=200, content={"status": "ignored"})

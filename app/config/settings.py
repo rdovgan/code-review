@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     AI_MAX_DIFF_TOKENS: int = 8000
     REDIS_URL: str = "redis://localhost:6379/0"
     MAX_DIFF_LINES: int = 500
+    AI_DAILY_TOKEN_BUDGET: int = 100_000  # input+output tokens per day; 0 = unlimited
 
 
 @lru_cache

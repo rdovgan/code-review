@@ -1,9 +1,11 @@
 import json
 import logging
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
 import anthropic
+import redis
 
 from app.config.settings import Settings
 from app.models import Finding, PRContext, ReviewConfig, Severity
@@ -33,6 +35,23 @@ class AIReviewer:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        self._redis = redis.from_url(settings.REDIS_URL)
+
+    def _budget_key(self) -> str:
+        return f"ai_tokens:{date.today().isoformat()}"
+
+    def _check_and_record_tokens(self, input_tokens: int, output_tokens: int) -> bool:
+        """Returns False if daily budget is exceeded. Always records usage."""
+        budget = self._settings.AI_DAILY_TOKEN_BUDGET
+        key = self._budget_key()
+        total = input_tokens + output_tokens
+        new_count = self._redis.incrby(key, total)
+        self._redis.expire(key, 86400 * 2)  # keep 2 days for visibility
+        if budget > 0 and (new_count - total) >= budget:
+            logger.warning("Daily AI token budget (%d) exceeded: %d used today", budget, new_count)
+            return False
+        logger.info("AI tokens used: input=%d output=%d daily_total=%d", input_tokens, output_tokens, new_count)
+        return True
 
     def _load_prompt(self, language: str) -> str:
         prompt_file = _PROMPTS_DIR / f"{language}_prompt.md"
@@ -93,6 +112,12 @@ class AIReviewer:
         chunks = self._split_if_needed(pr_context.diff)
         findings: list[Finding] = []
         for chunk in chunks:
+            # Pre-check budget before sending
+            if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
+                used = int(self._redis.get(self._budget_key()) or 0)
+                if used >= self._settings.AI_DAILY_TOKEN_BUDGET:
+                    logger.warning("Daily AI token budget reached (%d), skipping AI review", used)
+                    break
             try:
                 response = self._client.messages.create(
                     model=self._settings.AI_MODEL,
@@ -100,6 +125,7 @@ class AIReviewer:
                     system=prompt,
                     messages=[{"role": "user", "content": chunk}],
                 )
+                self._check_and_record_tokens(response.usage.input_tokens, response.usage.output_tokens)
                 text = response.content[0].text
                 items = self._parse_response(text)
                 for item in items:

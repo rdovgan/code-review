@@ -109,6 +109,17 @@ async def webhook_bitbucket(request: Request):
     if pr_context is None:
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
+    # Deduplicate: skip if this PR is already queued or running (60s window)
+    dedup_key = f"review_lock:{pr_context.repo_full_name}:{pr_context.pr_id}"
+    try:
+        r = aioredis.from_url(settings.REDIS_URL)
+        acquired = await r.set(dedup_key, "1", nx=True, ex=300)  # 5 min = task time limit
+        await r.aclose()
+    except Exception:
+        acquired = True  # Redis error — let it through
+    if not acquired:
+        return JSONResponse(status_code=200, content={"status": "already_queued"})
+
     task_payload = {"platform": "bitbucket", "diff": "", **asdict(pr_context)}
     task = process_review.delay(task_payload)
     return JSONResponse(status_code=202, content={"status": "queued", "task_id": task.id})

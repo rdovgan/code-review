@@ -27,6 +27,8 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
+    task_time_limit=300,       # kill task after 5 min — prevents hung workers
+    task_soft_time_limit=240,  # give task 4 min to finish gracefully
 )
 
 
@@ -48,7 +50,7 @@ def _build_summary(findings, critical_count, bug_count, perf_count, suggest_coun
     return "\n".join(lines)
 
 
-@celery_app.task(bind=True, max_retries=3, autoretry_for=(Exception,), retry_backoff=True)
+@celery_app.task(bind=True, max_retries=2, autoretry_for=(ConnectionError, TimeoutError), retry_backoff=True)
 def process_review(self, task_payload: dict) -> dict:
     payload = dict(task_payload)  # copy — pop() would corrupt dict on retry
     platform = payload.pop("platform")

@@ -68,15 +68,15 @@ class SemgrepRunner:
                 return []
 
             if result.returncode not in (0, 1):
-                logger.warning("Semgrep exited with code %d stderr=%s stdout=%s",
-                               result.returncode, result.stderr[:500], result.stdout[:200])
+                logger.warning("Semgrep exited with code %d\nSTDERR:\n%s\nSTDOUT:\n%s",
+                               result.returncode, result.stderr, result.stdout[:500])
                 return []
 
             try:
                 data = json.loads(result.stdout)
             except json.JSONDecodeError:
-                logger.warning("Failed to parse Semgrep output: returncode=%d stderr=%s stdout=%s",
-                               result.returncode, result.stderr[:500], result.stdout[:200])
+                logger.warning("Failed to parse Semgrep output: returncode=%d\nSTDERR:\n%s\nSTDOUT:\n%s",
+                               result.returncode, result.stderr, result.stdout[:500])
                 return []
 
             findings: list[Finding] = []

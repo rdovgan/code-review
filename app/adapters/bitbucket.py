@@ -35,12 +35,16 @@ class BitbucketAdapter(GitPlatform):
         return hmac_verify(self._secret, body, signature)
 
     def parse_webhook(self, payload: dict) -> Optional[PRContext]:
-        event = payload.get("event") or payload.get("eventKey", "")
-        # Bitbucket Cloud sends event in a separate header, not payload;
-        # payload key "pullrequest" indicates PR events.
         pr = payload.get("pullrequest")
         if not pr:
             return None
+
+        # If this is a comment event, only trigger on "review" command
+        comment = payload.get("comment")
+        if comment is not None:
+            text = comment.get("content", {}).get("raw", "").strip().lower()
+            if text != "review":
+                return None
 
         actor = payload.get("actor", {})
         repo = pr.get("destination", {}).get("repository", {})
@@ -96,7 +100,9 @@ class BitbucketAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        body = f"**[{finding.severity.value}]** {finding.message}\n\n{finding.suggestion}"
+        body = f"**[{finding.severity.value}]** {finding.message}"
+        if finding.suggestion:
+            body += f"\n\n💡 {finding.suggestion}"
         payload = {
             "content": {"raw": body},
             "inline": {"path": finding.file, "to": finding.line},

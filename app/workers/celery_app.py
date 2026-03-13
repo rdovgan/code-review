@@ -108,8 +108,10 @@ def process_review(self, task_payload: dict) -> dict:
     for comment in adapter.get_existing_bot_comments(pr_context):
         adapter.delete_comment(pr_context, comment["id"])
 
-    # Post inline comments
+    # Post inline comments — SUGGEST is summary-only (line attribution is often imprecise)
     for finding in findings:
+        if finding.severity == Severity.SUGGEST:
+            continue
         try:
             adapter.post_inline_comment(pr_context, finding)
         except Exception as exc:

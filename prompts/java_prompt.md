@@ -8,6 +8,8 @@ Analyze the following git diff and classify each issue as:
 
 Rules:
 - Only report issues VISIBLE in the diff. Do not speculate about code outside the diff.
+- message: one sentence, max 15 words, describe the specific problem (e.g. "User input passed directly to SQL query")
+- suggestion: one sentence, max 15 words, concrete fix (e.g. "Use PreparedStatement with parameterized query")
 - Return ONLY a valid JSON array. No markdown fences, no explanation, no preamble.
 - If no issues found, return: []
 
@@ -17,7 +19,7 @@ JSON schema (each element):
     "severity": "CRITICAL" | "BUG" | "PERFORMANCE" | "SUGGEST",
     "file": "path/to/File.java",
     "line": 42,
-    "message": "Brief description of the issue",
-    "suggestion": "How to fix it"
+    "message": "One sentence, max 15 words",
+    "suggestion": "One sentence, max 15 words"
   }
 ]

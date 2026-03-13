@@ -8,6 +8,8 @@ Analyze the following git diff and classify each issue as:
 
 Rules:
 - Only report issues VISIBLE in the diff. Do not speculate about code outside the diff.
+- message: one sentence, max 15 words, describe the specific problem (e.g. "User input passed to eval() allows arbitrary code execution")
+- suggestion: one sentence, max 15 words, concrete fix (e.g. "Replace eval() with JSON.parse() or a safe alternative")
 - Return ONLY a valid JSON array. No markdown fences, no explanation, no preamble.
 - If no issues found, return: []
 
@@ -17,7 +19,7 @@ JSON schema (each element):
     "severity": "CRITICAL" | "BUG" | "PERFORMANCE" | "SUGGEST",
     "file": "path/to/file.js",
     "line": 42,
-    "message": "Brief description of the issue",
-    "suggestion": "How to fix it"
+    "message": "One sentence, max 15 words",
+    "suggestion": "One sentence, max 15 words"
   }
 ]

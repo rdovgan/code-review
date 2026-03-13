@@ -36,12 +36,15 @@ def _build_summary(findings, critical_count, bug_count, perf_count, suggest_coun
         "",
         f"**Total findings:** {len(findings)}  ",
         f"🔴 Critical: {critical_count}  |  🟠 Bugs: {bug_count}  |  🟡 Performance: {perf_count}  |  🔵 Suggestions: {suggest_count}",
-        "",
-        "| Severity | File | Line | Message |",
-        "|----------|------|------|---------|",
     ]
-    for f in findings:
-        lines.append(f"| {f.severity.value} | `{f.file}` | {f.line} | {f.message} |")
+    if findings:
+        lines += [
+            "",
+            "| Severity | File | Line | Message |",
+            "|----------|------|------|---------|",
+        ]
+        for f in findings:
+            lines.append(f"| {f.severity.value} | `{f.file}` | {f.line} | {f.message} |")
     return "\n".join(lines)
 
 
@@ -72,13 +75,10 @@ def process_review(self, task_payload: dict) -> dict:
     )
 
     diff_lines = len(pr_context.diff.splitlines())
-    if diff_lines > config.max_diff_lines:
-        adapter.post_summary_comment(
-            pr_context,
-            f"PR is too large for automated review ({diff_lines} lines, limit {config.max_diff_lines}). "
-            "Please split the PR or increase `max_diff_lines` in `.codereview.yml`.",
-        )
-        return {"status": "skipped", "reason": "diff_too_large", "lines": diff_lines}
+    truncated = diff_lines > config.max_diff_lines
+    if truncated:
+        pr_context.diff = "\n".join(pr_context.diff.splitlines()[:config.max_diff_lines])
+        logger.info("Diff truncated from %d to %d lines for analysis", diff_lines, config.max_diff_lines)
 
     adapter.set_review_status(pr_context, "pending", "Code review in progress...")
 
@@ -121,8 +121,10 @@ def process_review(self, task_payload: dict) -> dict:
     perf_count = sum(1 for f in findings if f.severity == Severity.PERFORMANCE)
     suggest_count = sum(1 for f in findings if f.severity == Severity.SUGGEST)
 
-    if findings:
+    if findings or truncated:
         summary = _build_summary(findings, critical_count, bug_count, perf_count, suggest_count)
+        if truncated:
+            summary += f"\n\n> ⚠️ PR has {diff_lines} lines. Analysis was performed on the first {config.max_diff_lines} lines."
         try:
             adapter.post_summary_comment(pr_context, summary)
         except Exception as exc:

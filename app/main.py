@@ -119,8 +119,9 @@ async def webhook_bitbucket(request: Request):
         r = aioredis.from_url(settings.REDIS_URL)
         acquired = await r.set(dedup_key, "1", nx=True, ex=300)  # 5 min = task time limit
         await r.aclose()
-    except Exception:
-        acquired = True  # Redis error — let it through
+    except Exception as exc:
+        logger.warning("redis_lock_failed", error=str(exc))
+        return JSONResponse(status_code=503, content={"error": "redis_unavailable"})
     if not acquired:
         return JSONResponse(status_code=200, content={"status": "already_queued"})
 

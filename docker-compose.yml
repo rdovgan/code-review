@@ -9,6 +9,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
     env_file:
       - .env
+    volumes:
+      - ./config:/app/config:ro
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     depends_on:
       redis:
@@ -21,6 +23,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
     env_file:
       - .env
+    volumes:
+      - ./config:/app/config:ro
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
     depends_on:
       redis:

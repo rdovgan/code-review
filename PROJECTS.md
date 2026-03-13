@@ -158,6 +158,7 @@ If nothing appears after 30 seconds: `docker compose logs --tail=50 worker`
 | `ignore_paths` | list | `[]` | Glob patterns — matching files produce no findings |
 | `semgrep_rules` | list | `[owasp, security-audit]` | Rule packs: `owasp`, `security-audit`, `p/java`, `p/csharp`, `p/php`, `p/javascript` |
 | `ai_focus` | list | `[security, bugs]` | Hints passed to the AI prompt |
+| `target_branches` | list | `[master, main]` | Only review PRs targeting these branches |
 | `slack_channel` | string | `""` | Slack channel for notifications (Phase 3, not yet active) |
 
 ### Severity levels

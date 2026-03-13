@@ -45,6 +45,7 @@ class PRContext:
     title: str
     language: str
     diff: str
+    target_branch: str = "main"
     changed_files: list[str] = field(default_factory=list)
 
 
@@ -59,3 +60,4 @@ class ReviewConfig:
     ignore_paths: list[str] = field(default_factory=list)
     semgrep_rules: list[str] = field(default_factory=lambda: ["owasp", "security-audit"])
     ai_focus: list[str] = field(default_factory=lambda: ["security", "bugs"])
+    target_branches: list[str] = field(default_factory=lambda: ["master", "main"])

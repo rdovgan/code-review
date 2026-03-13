@@ -67,6 +67,11 @@ def process_review(self, task_payload: dict) -> dict:
         pr_context.changed_files = adapter.get_changed_files(pr_context)
 
     config = load_project_config(adapter, pr_context)
+
+    if config.target_branches and pr_context.target_branch not in config.target_branches:
+        logger.info("Skipping review: target branch %r not in %s", pr_context.target_branch, config.target_branches)
+        return {"status": "skipped", "reason": "branch_not_targeted", "branch": pr_context.target_branch}
+
     if pr_context.language == "auto":
         pr_context.language = detect_language(pr_context.changed_files)
 

@@ -51,6 +51,7 @@ class BitbucketAdapter(GitPlatform):
         repo_full = repo.get("full_name", "")
         base_sha = pr.get("destination", {}).get("commit", {}).get("hash", "")
         head_sha = pr.get("source", {}).get("commit", {}).get("hash", "")
+        target_branch = pr.get("destination", {}).get("branch", {}).get("name", "main")
         author = actor.get("display_name", actor.get("nickname", "unknown"))
         title = pr.get("title", "")
         pr_id = pr.get("id", 0)
@@ -63,6 +64,7 @@ class BitbucketAdapter(GitPlatform):
             head_sha=head_sha,
             author=author,
             title=title,
+            target_branch=target_branch,
             language="auto",
             diff="",
             changed_files=[],

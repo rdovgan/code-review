@@ -57,41 +57,61 @@ projects:
 
 No restart needed — the file is read on every review task.
 
-### Step 2 — Add credentials for the workspace
+### Step 2 — Add credentials in config/credentials.yml
 
-Each Bitbucket organization (workspace) has its own credentials in `config/credentials.yml`.
-
-**Create an App Password for the workspace:**
-
-1. **Bitbucket → Personal Settings → App passwords → Create app password**
-2. Label: `code-review-bot`
-3. Permissions: **Repositories: Read**, **Pull requests: Read, Write**
-4. Copy the password
-
-**Generate a webhook secret:**
-```bash
-openssl rand -hex 32
-```
-
-**Add the workspace and repository to `config/credentials.yml` on the VPS:**
 ```bash
 nano ~/code-review/config/credentials.yml
 ```
 
+Generate a webhook secret for the repo:
+```bash
+openssl rand -hex 32
+```
+
+**Use whichever token type your Bitbucket plan allows:**
+
+**Repository Access Token** (per-repo — most common):
+- Repository → **Settings → Security → Access tokens → Create access token**
+- Scopes: **Repositories: Read** | **Pull requests: Read, Write**
+
 ```yaml
 bitbucket:
   workspaces:
-
-    myworkspace:                          # Bitbucket workspace slug
-      username: alice                     # Bitbucket account username
-      app_password: ATBBxxxxxxxxxxxx      # App password (one per workspace)
+    myworkspace:
       repositories:
-        my-service:                       # repository slug
-          webhook_secret: aabbccdd...     # unique per repo (openssl rand -hex 32)
+        my-service:
+          api_token: ATBBxxxxxxxxxxxx      # Repository Access Token
+          webhook_secret: aabbccdd...
 ```
 
-`username` and `app_password` are workspace-level — shared by all repos in that org.
-`webhook_secret` is per-repository — matches the secret set in each Bitbucket webhook.
+**Workspace Access Token** (one token covers all repos in the workspace):
+- Workspace → **Settings → Security → Access tokens → Create access token**
+
+```yaml
+bitbucket:
+  workspaces:
+    myworkspace:
+      api_token: ATBBxxxxxxxxxxxx          # Workspace Access Token
+      repositories:
+        my-service:
+          webhook_secret: aabbccdd...
+        other-service:
+          webhook_secret: 11223344...
+```
+
+**App Password** (legacy, still works):
+- Profile avatar → **Personal settings → App passwords**
+
+```yaml
+bitbucket:
+  workspaces:
+    myworkspace:
+      username: alice
+      app_password: ATBBxxxxxxxxxxxx
+      repositories:
+        my-service:
+          webhook_secret: aabbccdd...
+```
 
 No restart needed — credentials are read on every request.
 

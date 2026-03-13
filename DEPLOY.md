@@ -102,37 +102,55 @@ nano config/credentials.yml
 chmod 600 config/credentials.yml
 ```
 
-**How to create a Bitbucket App Password** (one per workspace/organization):
-1. Bitbucket → Personal Settings → App passwords → Create app password
-2. Label: `code-review-bot`
-3. Permissions: **Repositories: Read** | **Pull requests: Read, Write**
-
 Generate a webhook secret for each repository:
 ```bash
 openssl rand -hex 32
 ```
 
-Structure: workspace holds `username` + `app_password`; each repository holds its own `webhook_secret`.
+**Auth options** — use whichever your Bitbucket plan supports (first match wins per repo):
+
+**Option A — Repository Access Token** (per-repo, most common)
+- Repository → **Settings → Security → Access tokens → Create access token**
+- Scopes: **Repositories: Read** | **Pull requests: Read, Write**
+
+**Option B — Workspace Access Token** (one token for all repos in the workspace)
+- Workspace → **Settings → Security → Access tokens → Create access token**
+- Scopes: **Repositories: Read** | **Pull requests: Read, Write**
+
+**Option C — App Password** (legacy, still works)
+- Profile avatar → **Personal settings → App passwords → Create app password**
+- Permissions: **Repositories: Read** | **Pull requests: Read, Write**
 
 ```yaml
 bitbucket:
   workspaces:
 
-    first-workspace:                         # Bitbucket workspace slug
-      username: alice                        # Bitbucket account username
-      app_password: ATBBxxxxxxxxxxxx         # App password (workspace-level)
+    # Option A: per-repo token
+    first-workspace:
       repositories:
-        backend-api:                         # repository slug
-          webhook_secret: aabbccdd...        # unique per repo (openssl rand -hex 32)
+        backend-api:
+          api_token: ATBBxxxxxxxxxxxx         # Repository Access Token
+          webhook_secret: aabbccdd...
         frontend-app:
+          api_token: ATBByyyyyyyyyyyy
           webhook_secret: 11223344...
 
+    # Option B: workspace token shared by all repos
     second-workspace:
-      username: bob
-      app_password: ATBByyyyyyyyyyyy
+      api_token: ATBBzzzzzzzzzzzzzz           # Workspace Access Token
       repositories:
         mobile-app:
           webhook_secret: deadbeef...
+        data-service:
+          webhook_secret: cafebabe...
+
+    # Option C: App Password (legacy)
+    third-workspace:
+      username: alice
+      app_password: ATBBaaaaaaaaaaaa
+      repositories:
+        legacy-app:
+          webhook_secret: 00001111...
 ```
 
 No bot restart is needed when editing this file — credentials are read on every request.

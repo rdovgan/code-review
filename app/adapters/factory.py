@@ -8,8 +8,9 @@ def get_adapter(platform: str, workspace: str, repo_slug: str, settings: Setting
     if platform == "bitbucket":
         creds = get_credentials("bitbucket", workspace, repo_slug)
         return BitbucketAdapter(
-            username=creds["username"],
-            app_password=creds["app_password"],
             webhook_secret=creds["webhook_secret"],
+            username=creds.get("username", ""),
+            app_password=creds.get("app_password", ""),
+            api_token=creds.get("api_token", ""),
         )
     raise ValueError(f"Unknown platform: {platform!r}")

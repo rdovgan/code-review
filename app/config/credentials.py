@@ -38,11 +38,18 @@ def get_credentials(platform: str, workspace: str, repo_slug: str) -> dict:
 
     ws = workspaces[workspace]
 
-    for field in ("username", "app_password"):
-        if not ws.get(field):
-            raise ValueError(
-                f"Workspace '{workspace}' in config/credentials.yml is missing '{field}'."
-            )
+    # Support both auth methods:
+    #   api_token  → Bearer token (Bitbucket API tokens, newer)
+    #   username + app_password → Basic auth (App Passwords, legacy)
+    if ws.get("api_token"):
+        api_creds = {"api_token": ws["api_token"]}
+    elif ws.get("username") and ws.get("app_password"):
+        api_creds = {"username": ws["username"], "app_password": ws["app_password"]}
+    else:
+        raise ValueError(
+            f"Workspace '{workspace}' must have either 'api_token' "
+            f"or both 'username' and 'app_password' in config/credentials.yml."
+        )
 
     repos = ws.get("repositories", {})
     if repo_slug not in repos:
@@ -57,8 +64,4 @@ def get_credentials(platform: str, workspace: str, repo_slug: str) -> dict:
             f"Repository '{workspace}/{repo_slug}' in config/credentials.yml is missing 'webhook_secret'."
         )
 
-    return {
-        "username": ws["username"],
-        "app_password": ws["app_password"],
-        "webhook_secret": repo["webhook_secret"],
-    }
+    return {**api_creds, "webhook_secret": repo["webhook_secret"]}

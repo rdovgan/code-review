@@ -12,12 +12,18 @@ BITBUCKET_API = "https://api.bitbucket.org"
 
 
 class BitbucketAdapter(GitPlatform):
-    def __init__(self, username: str, app_password: str, webhook_secret: str) -> None:
+    def __init__(self, webhook_secret: str, username: str = "", app_password: str = "", api_token: str = "") -> None:
         self._secret = webhook_secret
-        self._client = httpx.Client(
-            auth=(username, app_password),
-            timeout=30,
-        )
+        if api_token:
+            self._client = httpx.Client(
+                headers={"Authorization": f"Bearer {api_token}"},
+                timeout=30,
+            )
+        else:
+            self._client = httpx.Client(
+                auth=(username, app_password),
+                timeout=30,
+            )
 
     def validate_webhook(self, body: bytes, headers: dict) -> bool:
         sig_header = headers.get("x-hub-signature", "")

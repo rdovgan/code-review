@@ -46,6 +46,11 @@ class BitbucketAdapter(GitPlatform):
             if text != "review":
                 return None
 
+        state = pr.get("state", "")
+        if state != "OPEN":
+            logger.info("Skipping PR: state is %r (only OPEN PRs are reviewed)", state)
+            return None
+
         actor = payload.get("actor", {})
         repo = pr.get("destination", {}).get("repository", {})
         repo_full = repo.get("full_name", "")

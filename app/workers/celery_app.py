@@ -1,5 +1,4 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
 from celery import Celery
@@ -92,22 +91,20 @@ def process_review(self, task_payload: dict) -> dict:
     semgrep_results = []
     ai_results = []
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {}
-        if config.static_analysis:
-            futures["semgrep"] = executor.submit(SemgrepRunner(config).run, pr_context, adapter)
-        if config.ai_review:
-            futures["ai"] = executor.submit(AIReviewer(settings).review, pr_context, config)
+    if config.static_analysis:
+        try:
+            semgrep_results = SemgrepRunner(config).run(pr_context, adapter)
+        except Exception as exc:
+            logger.error("Analyzer semgrep failed: %s", exc)
 
-        for name, future in futures.items():
-            try:
-                result = future.result()
-                if name == "semgrep":
-                    semgrep_results = result
-                else:
-                    ai_results = result
-            except Exception as exc:
-                logger.error("Analyzer %s failed: %s", name, exc)
+    if config.ai_review and not semgrep_results:
+        logger.info("No semgrep findings — proceeding with AI review")
+        try:
+            ai_results = AIReviewer(settings).review(pr_context, config)
+        except Exception as exc:
+            logger.error("Analyzer ai failed: %s", exc)
+    elif semgrep_results:
+        logger.info("Semgrep found %d issues — skipping AI review", len(semgrep_results))
 
     findings = filter_by_config(merge_findings(semgrep_results, ai_results), config)
 

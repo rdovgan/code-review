@@ -65,9 +65,11 @@ def process_review(self, task_payload: dict) -> dict:
     if pr_context.language == "auto":
         pr_context.language = detect_language(pr_context.changed_files)
 
-    logger.info("review_started", repo=pr_context.repo_full_name, pr=pr_context.pr_id,
-                language=pr_context.language, diff_lines=len(pr_context.diff.splitlines()),
-                changed_files=pr_context.changed_files)
+    logger.info(
+        "review_started repo=%s pr=%s language=%s diff_lines=%d changed_files=%s",
+        pr_context.repo_full_name, pr_context.pr_id, pr_context.language,
+        len(pr_context.diff.splitlines()), pr_context.changed_files,
+    )
 
     diff_lines = len(pr_context.diff.splitlines())
     if diff_lines > config.max_diff_lines:

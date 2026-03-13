@@ -3,7 +3,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import BOT_MARKER, GitPlatform, hmac_verify
+from app.adapters.base import GitPlatform, hmac_verify
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ class BitbucketAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        body = f"**[{finding.severity.value}]** {finding.message}\n\n{finding.suggestion}\n\n{BOT_MARKER}"
+        body = f"**[{finding.severity.value}]** {finding.message}\n\n{finding.suggestion}"
         payload = {
             "content": {"raw": body},
             "inline": {"path": finding.file, "to": finding.line},
@@ -108,7 +108,7 @@ class BitbucketAdapter(GitPlatform):
     def post_summary_comment(self, pr_context: PRContext, body: str) -> str:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        payload = {"content": {"raw": body + "\n\n" + BOT_MARKER}}
+        payload = {"content": {"raw": body}}
         resp = self._client.post(url, json=payload)
         resp.raise_for_status()
         return str(resp.json().get("id", ""))
@@ -127,7 +127,7 @@ class BitbucketAdapter(GitPlatform):
         comments = []
         for c in resp.json().get("values", []):
             raw = c.get("content", {}).get("raw", "")
-            if BOT_MARKER in raw:
+            if "## AI Code Review Summary" in raw or raw.startswith("**[CRITICAL]**") or raw.startswith("**[BUG]**") or raw.startswith("**[PERFORMANCE]**") or raw.startswith("**[SUGGEST]**"):
                 comments.append({"id": str(c.get("id", "")), "body": raw})
         return comments
 

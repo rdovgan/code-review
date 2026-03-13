@@ -4,7 +4,6 @@ from dataclasses import asdict
 
 from celery import Celery
 
-from app.adapters.base import BOT_MARKER
 from app.adapters.factory import get_adapter
 from app.analyzers.ai_reviewer import AIReviewer
 from app.analyzers.merger import filter_by_config, merge_findings
@@ -33,7 +32,6 @@ celery_app.conf.update(
 
 def _build_summary(findings, critical_count, bug_count, perf_count, suggest_count) -> str:
     lines = [
-        f"{BOT_MARKER}",
         "## AI Code Review Summary",
         "",
         f"**Total findings:** {len(findings)}  ",
@@ -66,6 +64,10 @@ def process_review(self, task_payload: dict) -> dict:
     config = load_project_config(adapter, pr_context)
     if pr_context.language == "auto":
         pr_context.language = detect_language(pr_context.changed_files)
+
+    logger.info("review_started", repo=pr_context.repo_full_name, pr=pr_context.pr_id,
+                language=pr_context.language, diff_lines=len(pr_context.diff.splitlines()),
+                changed_files=pr_context.changed_files)
 
     diff_lines = len(pr_context.diff.splitlines())
     if diff_lines > config.max_diff_lines:
@@ -117,11 +119,12 @@ def process_review(self, task_payload: dict) -> dict:
     perf_count = sum(1 for f in findings if f.severity == Severity.PERFORMANCE)
     suggest_count = sum(1 for f in findings if f.severity == Severity.SUGGEST)
 
-    summary = _build_summary(findings, critical_count, bug_count, perf_count, suggest_count)
-    try:
-        adapter.post_summary_comment(pr_context, summary)
-    except Exception as exc:
-        logger.warning("Failed to post summary comment: %s", exc)
+    if findings:
+        summary = _build_summary(findings, critical_count, bug_count, perf_count, suggest_count)
+        try:
+            adapter.post_summary_comment(pr_context, summary)
+        except Exception as exc:
+            logger.warning("Failed to post summary comment: %s", exc)
 
     final_state = "failure" if any(f.severity.value in config.block_merge_on for f in findings) else "success"
     adapter.set_review_status(pr_context, final_state, f"{len(findings)} issues found")

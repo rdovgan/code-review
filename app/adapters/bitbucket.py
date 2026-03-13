@@ -18,11 +18,13 @@ class BitbucketAdapter(GitPlatform):
             self._client = httpx.Client(
                 headers={"Authorization": f"Bearer {api_token}"},
                 timeout=30,
+                follow_redirects=True,
             )
         else:
             self._client = httpx.Client(
                 auth=(username, app_password),
                 timeout=30,
+                follow_redirects=True,
             )
 
     def validate_webhook(self, body: bytes, headers: dict) -> bool:

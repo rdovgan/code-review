@@ -16,6 +16,8 @@ COPY . .
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+ENV SEMGREP_VERSION_CACHE_PATH=/tmp/.semgrep_version
+ENV SEMGREP_SEND_METRICS=off
 USER appuser
 
 EXPOSE 8000

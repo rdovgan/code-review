@@ -13,6 +13,43 @@
 
 projects:
 
+
+  rdovgan/dungeon:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 500
+    ignore_paths:
+      - "assets/*"
+      - "**/*.dat"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+    ai_focus:
+      - security
+      - bugs
+
+  rdovgan/pathminer:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 500
+    ignore_paths:
+      - "data/*"
+      - "**/*.png"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+    ai_focus:
+      - security
+      - bugs
+
   # ── Example: Java backend ──────────────────────────────────────────────────
 #  myworkspace/my-java-api:
 #    language: java

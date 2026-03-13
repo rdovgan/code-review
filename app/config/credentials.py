@@ -38,19 +38,6 @@ def get_credentials(platform: str, workspace: str, repo_slug: str) -> dict:
 
     ws = workspaces[workspace]
 
-    # Support both auth methods:
-    #   api_token  → Bearer token (Bitbucket API tokens, newer)
-    #   username + app_password → Basic auth (App Passwords, legacy)
-    if ws.get("api_token"):
-        api_creds = {"api_token": ws["api_token"]}
-    elif ws.get("username") and ws.get("app_password"):
-        api_creds = {"username": ws["username"], "app_password": ws["app_password"]}
-    else:
-        raise ValueError(
-            f"Workspace '{workspace}' must have either 'api_token' "
-            f"or both 'username' and 'app_password' in config/credentials.yml."
-        )
-
     repos = ws.get("repositories", {})
     if repo_slug not in repos:
         raise ValueError(
@@ -59,9 +46,24 @@ def get_credentials(platform: str, workspace: str, repo_slug: str) -> dict:
         )
 
     repo = repos[repo_slug]
+
     if not repo.get("webhook_secret"):
         raise ValueError(
-            f"Repository '{workspace}/{repo_slug}' in config/credentials.yml is missing 'webhook_secret'."
+            f"Repository '{workspace}/{repo_slug}' is missing 'webhook_secret' in config/credentials.yml."
+        )
+
+    # Auth priority: repo-level api_token → workspace-level api_token → workspace username+app_password
+    if repo.get("api_token"):
+        api_creds = {"api_token": repo["api_token"]}
+    elif ws.get("api_token"):
+        api_creds = {"api_token": ws["api_token"]}
+    elif ws.get("username") and ws.get("app_password"):
+        api_creds = {"username": ws["username"], "app_password": ws["app_password"]}
+    else:
+        raise ValueError(
+            f"No API credentials found for '{workspace}/{repo_slug}'. "
+            f"Add 'api_token' to the repository, 'api_token' to the workspace, "
+            f"or 'username'+'app_password' to the workspace in config/credentials.yml."
         )
 
     return {**api_creds, "webhook_secret": repo["webhook_secret"]}

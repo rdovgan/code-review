@@ -67,19 +67,17 @@ class SemgrepRunner:
                     cmd, cwd=tmp_dir, capture_output=True, timeout=120, text=True
                 )
             except subprocess.TimeoutExpired:
-                logger.warning("Semgrep timed out")
+                logger.error("Semgrep timed out after 120s")
                 return []
 
             if result.returncode not in (0, 1):
-                logger.warning("Semgrep exited with code %d\nSTDERR:\n%s\nSTDOUT:\n%s",
-                               result.returncode, result.stderr, result.stdout[:500])
+                logger.error("Semgrep exited with unexpected code %d: %s", result.returncode, result.stderr[:200])
                 return []
 
             try:
                 data = json.loads(result.stdout)
             except json.JSONDecodeError:
-                logger.warning("Failed to parse Semgrep output: returncode=%d\nSTDERR:\n%s\nSTDOUT:\n%s",
-                               result.returncode, result.stderr, result.stdout[:500])
+                logger.error("Semgrep returned invalid JSON (exit code %d)", result.returncode)
                 return []
 
             findings: list[Finding] = []

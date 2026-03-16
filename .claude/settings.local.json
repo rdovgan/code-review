@@ -6,7 +6,11 @@
       "Bash(python -m pytest tests/test_adapters.py tests/test_merger.py -v --tb=short 2>&1)",
       "Bash(python -m pytest tests/test_analyzers.py tests/test_worker.py -v --tb=short -m \"not integration\" 2>&1)",
       "Bash(python -m pytest tests/ -v --tb=short -m \"not integration\" 2>&1)",
-      "Bash(ls /Users/rdovgan/Desktop/projects/work/code-review/*.md)"
+      "Bash(ls /Users/rdovgan/Desktop/projects/work/code-review/*.md)",
+      "Bash(semgrep --version 2>&1)",
+      "Read(//private/tmp/**)",
+      "Bash(semgrep --config p/java --json semgrep_test/)",
+      "Bash(pytest tests/test_analyzers.py -v 2>&1)"
     ]
   }
 }

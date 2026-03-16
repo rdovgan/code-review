@@ -38,14 +38,23 @@ def _make_pr_context() -> PRContext:
     )
 
 
+def _make_reviewer(settings: Settings) -> AIReviewer:
+    reviewer = AIReviewer(settings)
+    reviewer._redis = MagicMock()
+    reviewer._redis.get.return_value = 0
+    reviewer._redis.incrby.return_value = 0
+    return reviewer
+
+
 def test_ai_reviewer_parses_valid_json():
     settings = _make_settings()
-    reviewer = AIReviewer(settings)
+    reviewer = _make_reviewer(settings)
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text=json.dumps([
         {"severity": "CRITICAL", "file": "Foo.java", "line": 10,
          "message": "SQL injection", "suggestion": "Use prepared statements"}
     ]))]
+    mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
     with patch.object(reviewer._client.messages, "create", return_value=mock_response):
         findings = reviewer.review(_make_pr_context(), ReviewConfig())
     assert len(findings) == 1
@@ -56,9 +65,10 @@ def test_ai_reviewer_parses_valid_json():
 
 def test_ai_reviewer_handles_malformed_json():
     settings = _make_settings()
-    reviewer = AIReviewer(settings)
+    reviewer = _make_reviewer(settings)
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text="This is not JSON at all!!!")]
+    mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
     with patch.object(reviewer._client.messages, "create", return_value=mock_response):
         findings = reviewer.review(_make_pr_context(), ReviewConfig())
     assert findings == []
@@ -66,10 +76,11 @@ def test_ai_reviewer_handles_malformed_json():
 
 def test_ai_reviewer_strips_markdown_fences():
     settings = _make_settings()
-    reviewer = AIReviewer(settings)
+    reviewer = _make_reviewer(settings)
     fenced = '```json\n[{"severity": "BUG", "file": "Bar.java", "line": 5, "message": "NPE risk", "suggestion": "Add null check"}]\n```'
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text=fenced)]
+    mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
     with patch.object(reviewer._client.messages, "create", return_value=mock_response):
         findings = reviewer.review(_make_pr_context(), ReviewConfig())
     assert len(findings) == 1
@@ -106,6 +117,20 @@ def test_semgrep_runner_filters_ignore_paths():
     assert "src/Main.java" in called_paths
 
 
+VULNERABLE_JAVA = """
+import java.sql.*;
+
+public class UserService {
+    private Connection conn;
+
+    public void getUserByName(String username) throws SQLException {
+        Statement stmt = conn.createStatement();
+        stmt.execute("SELECT * FROM users WHERE name = '" + username + "'");
+    }
+}
+"""
+
+
 @pytest.mark.integration
 def test_semgrep_on_fixture():
     """Requires semgrep installed locally."""
@@ -116,9 +141,8 @@ def test_semgrep_on_fixture():
 
     config = ReviewConfig(semgrep_rules=["p/java"])
     runner = SemgrepRunner(config)
-    diff_text = (FIXTURES / "sample_java.diff").read_text()
     mock_adapter = MagicMock()
-    mock_adapter.get_file_content.return_value = "// stub"
+    mock_adapter.get_file_content.return_value = VULNERABLE_JAVA
     pr_context = PRContext(
         platform="bitbucket",
         repo_full_name="workspace/repo",
@@ -128,9 +152,13 @@ def test_semgrep_on_fixture():
         author="dev",
         title="Test",
         language="java",
-        diff=diff_text,
-        changed_files=["src/main/java/com/example/UserService.java"],
+        diff="",
+        changed_files=["UserService.java"],
     )
     findings = runner.run(pr_context, mock_adapter)
-    # Integration test — just verify it runs without crashing
-    assert isinstance(findings, list)
+
+    assert len(findings) > 0, "Semgrep should detect SQL injection in vulnerable Java code"
+    sql_findings = [f for f in findings if "sql" in f.message.lower() or "injection" in f.message.lower()]
+    assert len(sql_findings) > 0, "Semgrep should detect SQL injection specifically"
+    assert all(f.source == "semgrep" for f in findings)
+    assert all(f.file == "UserService.java" for f in findings)

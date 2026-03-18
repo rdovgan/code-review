@@ -72,7 +72,8 @@ def process_review(self, task_payload: dict) -> dict:
 
     if config.target_branches and pr_context.target_branch not in config.target_branches:
         logger.info("[PR #%s %s] Skipped — branch '%s' not in target list", pr_context.pr_id, pr_context.repo_full_name, pr_context.target_branch)
-        metrics.record_review(status="skipped", duration_ms=0, critical=0, bugs=0, perf=0, suggestions=0, semgrep_count=0, ai_count=0)
+        metrics.record_review(status="skipped", duration_ms=0, critical=0, bugs=0, perf=0, suggestions=0, semgrep_count=0, ai_count=0,
+                              language=pr_context.language, project=pr_context.repo_full_name, author=pr_context.author)
         return {"status": "skipped", "reason": "branch_not_targeted", "branch": pr_context.target_branch}
 
     if pr_context.language == "auto":
@@ -159,6 +160,9 @@ def process_review(self, task_payload: dict) -> dict:
         suggestions=suggest_count,
         semgrep_count=len(semgrep_results),
         ai_count=len(ai_results),
+        language=pr_context.language,
+        project=pr_context.repo_full_name,
+        author=pr_context.author,
     )
 
     logger.info(

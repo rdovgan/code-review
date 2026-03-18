@@ -56,7 +56,7 @@ class SemgrepRunner:
                 return []
 
             rules = self._config.semgrep_rules
-            cmd = ["semgrep", "--json", "--no-rewrite-rule-ids"]
+            cmd = ["semgrep", "--json", "--no-rewrite-rule-ids", "--quiet", "--metrics=off"]
             for rule in rules:
                 mapped = SEMGREP_RULE_MAP.get(rule, rule)
                 cmd += ["--config", mapped]
@@ -77,7 +77,10 @@ class SemgrepRunner:
             try:
                 data = json.loads(result.stdout)
             except json.JSONDecodeError:
-                logger.error("Semgrep returned invalid JSON (exit code %d)", result.returncode)
+                logger.error(
+                    "Semgrep returned invalid JSON (exit code %d)\nSTDERR: %s\nSTDOUT: %s",
+                    result.returncode, result.stderr[:500], result.stdout[:200],
+                )
                 return []
 
             findings: list[Finding] = []

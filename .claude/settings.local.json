@@ -11,7 +11,9 @@
       "Read(//private/tmp/**)",
       "Bash(semgrep --config p/java --json semgrep_test/)",
       "Bash(pytest tests/test_analyzers.py -v 2>&1)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker ps:*)"
     ]
   }
 }

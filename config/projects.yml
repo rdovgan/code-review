@@ -28,6 +28,9 @@ projects:
       - owasp
       - security-audit
       - p/java
+      - p/findsecbugs
+      - p/secrets
+      - p/sql-injection
     ai_focus:
       - security
       - bugs
@@ -46,6 +49,9 @@ projects:
       - owasp
       - security-audit
       - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
     ai_focus:
       - security
       - bugs

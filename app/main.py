@@ -7,10 +7,11 @@ from dataclasses import asdict
 import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.adapters.factory import get_adapter
 from app.config.settings import get_settings
+from app.metrics import Metrics
 from app.workers.celery_app import process_review
 
 structlog.configure(
@@ -23,6 +24,7 @@ structlog.configure(
 logger = structlog.get_logger()
 
 settings = get_settings()
+metrics = Metrics(settings.REDIS_URL)
 
 
 @asynccontextmanager
@@ -56,6 +58,11 @@ async def log_requests(request: Request, call_next):
     )
     response.headers["x-request-id"] = request_id
     return response
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def prometheus_metrics():
+    return PlainTextResponse(metrics.prometheus_text(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/health")
@@ -107,10 +114,12 @@ async def webhook_bitbucket(request: Request):
 
     event_key = request.headers.get("x-event-key", "")
     if event_key and event_key not in ("pullrequest:created", "pullrequest:updated", "pullrequest:comment_created"):
+        metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored", "reason": "event_not_reviewable"})
 
     pr_context = adapter.parse_webhook(payload)
     if pr_context is None:
+        metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
     # Deduplicate: skip if this PR is already queued or running (60s window)
@@ -121,10 +130,13 @@ async def webhook_bitbucket(request: Request):
         await r.aclose()
     except Exception as exc:
         logger.warning("redis_lock_failed", error=str(exc))
+        metrics.inc_webhook("error")
         return JSONResponse(status_code=503, content={"error": "redis_unavailable"})
     if not acquired:
+        metrics.inc_webhook("already_queued")
         return JSONResponse(status_code=200, content={"status": "already_queued"})
 
     task_payload = {"platform": "bitbucket", "diff": "", **asdict(pr_context)}
     task = process_review.delay(task_payload)
+    metrics.inc_webhook("queued")
     return JSONResponse(status_code=202, content={"status": "queued", "task_id": task.id})

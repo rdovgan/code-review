@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import asdict
 
 from celery import Celery
@@ -9,11 +10,13 @@ from app.analyzers.merger import filter_by_config, merge_findings
 from app.analyzers.semgrep_runner import SemgrepRunner
 from app.config.project_config import detect_language, load_project_config
 from app.config.settings import get_settings
+from app.metrics import Metrics
 from app.models import PRContext, Severity
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
+metrics = Metrics(settings.REDIS_URL)
 
 celery_app = Celery(
     "code_review",
@@ -69,12 +72,14 @@ def process_review(self, task_payload: dict) -> dict:
 
     if config.target_branches and pr_context.target_branch not in config.target_branches:
         logger.info("[PR #%s %s] Skipped — branch '%s' not in target list", pr_context.pr_id, pr_context.repo_full_name, pr_context.target_branch)
+        metrics.record_review(status="skipped", duration_ms=0, critical=0, bugs=0, perf=0, suggestions=0, semgrep_count=0, ai_count=0)
         return {"status": "skipped", "reason": "branch_not_targeted", "branch": pr_context.target_branch}
 
     if pr_context.language == "auto":
         pr_context.language = detect_language(pr_context.changed_files)
 
     pr_tag = f"[PR #{pr_context.pr_id} {pr_context.repo_full_name}]"
+    review_start = time.monotonic()
     logger.info("%s Review started — %d files, language: %s", pr_tag, len(pr_context.changed_files), pr_context.language)
 
     diff_lines = len(pr_context.diff.splitlines())
@@ -143,6 +148,18 @@ def process_review(self, task_payload: dict) -> dict:
 
     final_state = "failure" if any(f.severity.value in config.block_merge_on for f in findings) else "success"
     adapter.set_review_status(pr_context, final_state, f"{len(findings)} issues found")
+
+    duration_ms = round((time.monotonic() - review_start) * 1000)
+    metrics.record_review(
+        status=final_state,
+        duration_ms=duration_ms,
+        critical=critical_count,
+        bugs=bug_count,
+        perf=perf_count,
+        suggestions=suggest_count,
+        semgrep_count=len(semgrep_results),
+        ai_count=len(ai_results),
+    )
 
     logger.info(
         "%s Done — total: %d (critical: %d, bugs: %d, perf: %d, suggestions: %d) status: %s",

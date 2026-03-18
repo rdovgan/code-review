@@ -51,7 +51,7 @@ services:
       - prometheus_data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.time=365d
     depends_on:
       - app
     restart: unless-stopped

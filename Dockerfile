@@ -9,10 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies (setuptools first — pkg_resources required by semgrep deps)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --force-reinstall setuptools && \
+RUN pip install --no-cache-dir setuptools && \
+    pip install --no-cache-dir -r requirements.txt && \
     semgrep --version
 
 # Copy application code

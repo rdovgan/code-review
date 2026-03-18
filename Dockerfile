@@ -2,16 +2,18 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies (libpcre2 required by semgrep's native osemgrep binary)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
+    libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --force-reinstall setuptools
+    pip install --no-cache-dir --force-reinstall setuptools && \
+    semgrep --version
 
 # Copy application code
 COPY . .

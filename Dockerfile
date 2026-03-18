@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # and isolated from any system-level pip conflicts
 COPY requirements.txt .
 RUN python -m venv /venv && \
-    /venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    /venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /venv/bin/pip install --no-cache-dir "setuptools<70" wheel && \
     /venv/bin/pip install --no-cache-dir -r requirements.txt && \
     /venv/bin/semgrep --version
 

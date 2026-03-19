@@ -122,11 +122,11 @@
       "gridPos": { "x": 0, "y": 30, "w": 24, "h": 10 },
       "options": { "sortBy": [{ "displayName": "Critical", "desc": true }] },
       "transformations": [
-        { "id": "merge", "options": {} },
+        { "id": "joinByField", "options": { "byField": "project" } },
         {
           "id": "organize",
           "options": {
-            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "severity": true },
+            "excludeByName": { "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true, "__name__": true, "instance": true, "job": true, "severity": true },
             "renameByName": {
               "project": "Project",
               "Value #A": "Critical",
@@ -159,11 +159,11 @@
       "gridPos": { "x": 0, "y": 41, "w": 24, "h": 10 },
       "options": { "sortBy": [{ "displayName": "Critical", "desc": true }] },
       "transformations": [
-        { "id": "merge", "options": {} },
+        { "id": "joinByField", "options": { "byField": "author" } },
         {
           "id": "organize",
           "options": {
-            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "severity": true },
+            "excludeByName": { "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true, "__name__": true, "instance": true, "job": true, "severity": true },
             "renameByName": {
               "author": "Author",
               "Value #A": "Critical",

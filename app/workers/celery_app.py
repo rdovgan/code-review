@@ -77,7 +77,7 @@ def process_review(self, task_payload: dict) -> dict:
         return {"status": "skipped", "reason": "branch_not_targeted", "branch": pr_context.target_branch}
 
     if pr_context.language == "auto":
-        pr_context.language = detect_language(pr_context.changed_files)
+        pr_context.language = config.language if config.language != "auto" else detect_language(pr_context.changed_files)
 
     pr_tag = f"[PR #{pr_context.pr_id} {pr_context.repo_full_name}]"
     review_start = time.monotonic()

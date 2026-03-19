@@ -99,23 +99,12 @@
       "type": "barchart",
       "title": "Findings by Language",
       "gridPos": { "x": 12, "y": 21, "w": 12, "h": 8 },
-      "options": {
-        "stacking": "normal",
-        "legend": { "displayMode": "list" },
-        "fieldConfig": {
-          "overrides": [
-            { "matcher": { "id": "byName", "options": "critical" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-            { "matcher": { "id": "byName", "options": "bug" },      "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
-            { "matcher": { "id": "byName", "options": "performance" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
-            { "matcher": { "id": "byName", "options": "suggestion" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] }
-          ]
-        }
-      },
+      "options": { "stacking": "normal", "legend": { "displayMode": "list" } },
       "targets": [
-        { "expr": "code_review_findings_by_language_total{severity=\"critical\"}", "legendFormat": "critical" },
-        { "expr": "code_review_findings_by_language_total{severity=\"bug\"}", "legendFormat": "bug" },
-        { "expr": "code_review_findings_by_language_total{severity=\"performance\"}", "legendFormat": "performance" },
-        { "expr": "code_review_findings_by_language_total{severity=\"suggestion\"}", "legendFormat": "suggestion" }
+        { "expr": "code_review_findings_by_language_total{severity=\"critical\"}", "legendFormat": "{{language}} critical" },
+        { "expr": "code_review_findings_by_language_total{severity=\"bug\"}", "legendFormat": "{{language}} bug" },
+        { "expr": "code_review_findings_by_language_total{severity=\"performance\"}", "legendFormat": "{{language}} performance" },
+        { "expr": "code_review_findings_by_language_total{severity=\"suggestion\"}", "legendFormat": "{{language}} suggestion" }
       ]
     },
 
@@ -128,34 +117,31 @@
     },
     {
       "id": 14,
-      "type": "barchart",
-      "title": "Reviews by Project",
-      "gridPos": { "x": 0, "y": 30, "w": 12, "h": 8 },
-      "options": { "legend": { "displayMode": "list" } },
-      "targets": [{ "expr": "sum by (project) (code_review_reviews_by_project_total)", "legendFormat": "{{project}}" }]
-    },
-    {
-      "id": 15,
-      "type": "barchart",
+      "type": "table",
       "title": "Findings by Project",
-      "gridPos": { "x": 12, "y": 30, "w": 12, "h": 8 },
-      "options": {
-        "stacking": "normal",
-        "legend": { "displayMode": "list" },
-        "fieldConfig": {
-          "overrides": [
-            { "matcher": { "id": "byName", "options": "critical" },    "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-            { "matcher": { "id": "byName", "options": "bug" },         "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
-            { "matcher": { "id": "byName", "options": "performance" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
-            { "matcher": { "id": "byName", "options": "suggestion" },  "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] }
-          ]
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 10 },
+      "options": { "sortBy": [{ "displayName": "Critical", "desc": true }] },
+      "transformations": [
+        { "id": "merge", "options": {} },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "severity": true },
+            "renameByName": {
+              "project": "Project",
+              "Value #A": "Critical",
+              "Value #B": "Bug",
+              "Value #C": "Performance",
+              "Value #D": "Suggestion"
+            }
+          }
         }
-      },
+      ],
       "targets": [
-        { "expr": "code_review_findings_by_project_total{severity=\"critical\"}", "legendFormat": "critical" },
-        { "expr": "code_review_findings_by_project_total{severity=\"bug\"}", "legendFormat": "bug" },
-        { "expr": "code_review_findings_by_project_total{severity=\"performance\"}", "legendFormat": "performance" },
-        { "expr": "code_review_findings_by_project_total{severity=\"suggestion\"}", "legendFormat": "suggestion" }
+        { "expr": "code_review_findings_by_project_total{severity=\"critical\"}", "instant": true, "format": "table", "legendFormat": "" },
+        { "expr": "code_review_findings_by_project_total{severity=\"bug\"}", "instant": true, "format": "table", "legendFormat": "" },
+        { "expr": "code_review_findings_by_project_total{severity=\"performance\"}", "instant": true, "format": "table", "legendFormat": "" },
+        { "expr": "code_review_findings_by_project_total{severity=\"suggestion\"}", "instant": true, "format": "table", "legendFormat": "" }
       ]
     },
 
@@ -163,39 +149,36 @@
       "id": 16,
       "type": "row",
       "title": "By Author",
-      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 1 },
       "collapsed": false
     },
     {
       "id": 17,
-      "type": "barchart",
-      "title": "Reviews by Author",
-      "gridPos": { "x": 0, "y": 39, "w": 12, "h": 8 },
-      "options": { "legend": { "displayMode": "list" } },
-      "targets": [{ "expr": "sum by (author) (code_review_reviews_by_author_total)", "legendFormat": "{{author}}" }]
-    },
-    {
-      "id": 18,
-      "type": "barchart",
+      "type": "table",
       "title": "Findings by Author",
-      "gridPos": { "x": 12, "y": 39, "w": 12, "h": 8 },
-      "options": {
-        "stacking": "normal",
-        "legend": { "displayMode": "list" },
-        "fieldConfig": {
-          "overrides": [
-            { "matcher": { "id": "byName", "options": "critical" },    "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-            { "matcher": { "id": "byName", "options": "bug" },         "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
-            { "matcher": { "id": "byName", "options": "performance" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
-            { "matcher": { "id": "byName", "options": "suggestion" },  "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] }
-          ]
+      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 10 },
+      "options": { "sortBy": [{ "displayName": "Critical", "desc": true }] },
+      "transformations": [
+        { "id": "merge", "options": {} },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "severity": true },
+            "renameByName": {
+              "author": "Author",
+              "Value #A": "Critical",
+              "Value #B": "Bug",
+              "Value #C": "Performance",
+              "Value #D": "Suggestion"
+            }
+          }
         }
-      },
+      ],
       "targets": [
-        { "expr": "code_review_findings_by_author_total{severity=\"critical\"}", "legendFormat": "critical" },
-        { "expr": "code_review_findings_by_author_total{severity=\"bug\"}", "legendFormat": "bug" },
-        { "expr": "code_review_findings_by_author_total{severity=\"performance\"}", "legendFormat": "performance" },
-        { "expr": "code_review_findings_by_author_total{severity=\"suggestion\"}", "legendFormat": "suggestion" }
+        { "expr": "code_review_findings_by_author_total{severity=\"critical\"}", "instant": true, "format": "table", "legendFormat": "" },
+        { "expr": "code_review_findings_by_author_total{severity=\"bug\"}", "instant": true, "format": "table", "legendFormat": "" },
+        { "expr": "code_review_findings_by_author_total{severity=\"performance\"}", "instant": true, "format": "table", "legendFormat": "" },
+        { "expr": "code_review_findings_by_author_total{severity=\"suggestion\"}", "instant": true, "format": "table", "legendFormat": "" }
       ]
     }
   ]

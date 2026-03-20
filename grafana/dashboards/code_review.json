@@ -76,7 +76,6 @@
       "type": "stat"
     },
     {
-      "description": "PRs where critical issues were found and merge is blocked",
       "fieldConfig": {
         "defaults": {
           "mappings": [],
@@ -100,71 +99,6 @@
         "h": 4,
         "w": 3,
         "x": 3,
-        "y": 0
-      },
-      "id": 22,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "thresholds": {
-          "steps": [
-            {
-              "color": "green"
-            },
-            {
-              "color": "red",
-              "value": 1
-            }
-          ]
-        },
-        "wideLayout": true
-      },
-      "pluginVersion": "10.4.2",
-      "targets": [
-        {
-          "expr": "round(increase(code_review_reviews_total{status=\"failure\"}[24h]))",
-          "legendFormat": "blocked",
-          "refId": "A"
-        }
-      ],
-      "title": "Blocked Merges Today",
-      "type": "stat"
-    },
-    {
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 6,
         "y": 0
       },
       "id": 2,
@@ -200,8 +134,12 @@
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
+      "description": "PRs where critical issues were found and merge is blocked",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -212,7 +150,7 @@
               },
               {
                 "color": "red",
-                "value": 10
+                "value": 5
               }
             ]
           }
@@ -222,10 +160,10 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 9,
+        "x": 6,
         "y": 0
       },
-      "id": 4,
+      "id": 22,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
@@ -244,12 +182,12 @@
       "pluginVersion": "10.4.2",
       "targets": [
         {
-          "expr": "round(increase(code_review_findings_total{severity=\"critical\"}[24h]))",
-          "legendFormat": "critical",
+          "expr": "round(increase(code_review_reviews_total{status=\"failure\"}[24h]))",
+          "legendFormat": "blocked",
           "refId": "A"
         }
       ],
-      "title": "Critical Findings Today",
+      "title": "Blocked Merges Today",
       "type": "gauge"
     },
     {

@@ -17,6 +17,7 @@ _EXT_TO_LANG = {
     ".ts": "js",
     ".tsx": "js",
     ".jsx": "js",
+    ".py": "python",
 }
 
 _PROJECTS_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "projects.yml"

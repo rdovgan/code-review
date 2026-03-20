@@ -22,6 +22,9 @@ SEMGREP_RULE_MAP = {
     "p/csharp": "p/csharp",
     "p/php": "p/php",
     "p/javascript": "p/javascript",
+    "p/python": "p/python",
+    "p/django": "p/django",
+    "p/flask": "p/flask",
 }
 
 SEVERITY_MAP = {

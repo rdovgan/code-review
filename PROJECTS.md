@@ -150,13 +150,13 @@ If nothing appears after 30 seconds: `docker compose logs --tail=50 worker`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `language` | string | `auto` | `java`, `dotnet`, `php`, `js`, or `auto` (detects from file extensions) |
+| `language` | string | `auto` | `java`, `dotnet`, `php`, `js`, `python`, or `auto` (detects from file extensions) |
 | `ai_review` | bool | `true` | Run the Claude AI analyzer |
 | `static_analysis` | bool | `true` | Run Semgrep |
 | `block_merge_on` | list | `[CRITICAL]` | Severity levels that set build status to FAILED |
 | `max_diff_lines` | int | `500` | Skip review if diff exceeds this line count |
 | `ignore_paths` | list | `[]` | Glob patterns — matching files produce no findings |
-| `semgrep_rules` | list | `[owasp, security-audit]` | Rule packs: `owasp`, `security-audit`, `p/java`, `p/csharp`, `p/php`, `p/javascript` |
+| `semgrep_rules` | list | `[owasp, security-audit]` | Rule packs: `owasp`, `security-audit`, `p/java`, `p/csharp`, `p/php`, `p/javascript`, `p/python`, `p/django`, `p/flask` |
 | `ai_focus` | list | `[security, bugs]` | Hints passed to the AI prompt |
 | `target_branches` | list | `[master, main]` | Only review PRs targeting these branches |
 | `slack_channel` | string | `""` | Slack channel for notifications (Phase 3, not yet active) |
@@ -205,6 +205,22 @@ myworkspace/laravel-app:
   language: php
   ignore_paths: ["vendor/*", "storage/*", "bootstrap/cache/*"]
   semgrep_rules: [owasp, p/php]
+```
+
+**Python / Django**
+```yaml
+myworkspace/django-api:
+  language: python
+  ignore_paths: ["migrations/*", "**/*_test.py", "tests/*"]
+  semgrep_rules: [owasp, security-audit, p/python, p/django]
+```
+
+**Python / Flask**
+```yaml
+myworkspace/flask-service:
+  language: python
+  ignore_paths: ["tests/*", "**/*_test.py"]
+  semgrep_rules: [owasp, security-audit, p/python, p/flask]
 ```
 
 **Legacy / large repo (lenient mode)**

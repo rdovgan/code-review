@@ -10,7 +10,7 @@
       "id": 1,
       "type": "stat",
       "title": "Reviews Today",
-      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 0, "y": 0, "w": 3, "h": 4 },
       "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [{ "expr": "round(sum(increase(code_review_reviews_total{status!=\"skipped\"}[24h])))", "legendFormat": "reviewed" }]
     },
@@ -19,7 +19,7 @@
       "type": "stat",
       "title": "Blocked Merges Today",
       "description": "PRs where critical issues were found and merge is blocked",
-      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 4, "y": 0, "w": 3, "h": 4 },
       "options": {
         "colorMode": "background",
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -31,12 +31,24 @@
       "id": 2,
       "type": "stat",
       "title": "Webhooks Today",
-      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 8, "y": 0, "w": 3, "h": 4 },
       "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [{ "expr": "round(increase(code_review_webhooks_total{status=\"queued\"}[24h]))", "legendFormat": "queued" }]
     },
     {
       "id": 3,
+      "type": "stat",
+      "title": "Critical Findings Today",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "red", "value": 1 }] }
+      },
+      "targets": [{ "expr": "round(increase(code_review_findings_total{severity=\"critical\"}[24h]))", "legendFormat": "critical" }]
+    },
+    {
+      "id": 4,
       "type": "stat",
       "title": "Avg Review Duration",
       "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
@@ -44,22 +56,10 @@
       "targets": [{ "expr": "code_review_duration_milliseconds_sum / clamp_min(code_review_duration_milliseconds_count, 1)", "legendFormat": "avg ms" }]
     },
     {
-      "id": 4,
-      "type": "stat",
-      "title": "Critical Findings Today",
-      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
-      "options": {
-        "colorMode": "background",
-        "reduceOptions": { "calcs": ["lastNotNull"] },
-        "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
-      },
-      "targets": [{ "expr": "round(increase(code_review_findings_total{severity=\"critical\"}[24h]))", "legendFormat": "critical" }]
-    },
-    {
       "id": 19,
       "type": "stat",
       "title": "Avg Findings per Review",
-      "gridPos": { "x": 20, "y": 0, "w": 2, "h": 4 },
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
       "options": {
         "colorMode": "value",
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -74,7 +74,7 @@
       "id": 20,
       "type": "stat",
       "title": "Webhook Efficiency",
-      "gridPos": { "x": 22, "y": 0, "w": 2, "h": 4 },
+      "gridPos": { "x": 22, "y": 0, "w": 4, "h": 4 },
       "options": {
         "colorMode": "value",
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -118,7 +118,7 @@
     },
     {
       "id": 7,
-      "type": "barchart",
+      "type": "timeseries",
       "title": "Findings by Severity (all time)",
       "gridPos": { "x": 12, "y": 12, "w": 6, "h": 8 },
       "targets": [{ "expr": "code_review_findings_total{severity!=\"total\"}", "legendFormat": "{{severity}}" }]

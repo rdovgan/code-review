@@ -212,7 +212,7 @@
               },
               {
                 "color": "red",
-                "value": 80
+                "value": 10
               }
             ]
           }
@@ -227,9 +227,8 @@
       },
       "id": 4,
       "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto",
+        "minVizHeight": 75,
+        "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -238,20 +237,9 @@
           "fields": "",
           "values": false
         },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "thresholds": {
-          "steps": [
-            {
-              "color": "green"
-            },
-            {
-              "color": "red",
-              "value": 1
-            }
-          ]
-        },
-        "wideLayout": true
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
       },
       "pluginVersion": "10.4.2",
       "targets": [
@@ -262,7 +250,7 @@
         }
       ],
       "title": "Critical Findings Today",
-      "type": "stat"
+      "type": "gauge"
     },
     {
       "fieldConfig": {

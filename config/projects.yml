@@ -77,6 +77,27 @@ projects:
       - security
       - bugs
 
+  mybookingpal/redis:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
   # ── Example: Java backend ──────────────────────────────────────────────────
 #  myworkspace/my-java-api:
 #    language: java

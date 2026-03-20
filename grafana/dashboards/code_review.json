@@ -1021,8 +1021,8 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 24,
+        "h": 10,
+        "w": 10,
         "x": 0,
         "y": 21
       },
@@ -1121,18 +1121,6 @@
       "type": "table"
     },
     {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 29
-      },
-      "id": 13,
-      "title": "By Project",
-      "type": "row"
-    },
-    {
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1161,9 +1149,9 @@
       },
       "gridPos": {
         "h": 10,
-        "w": 12,
-        "x": 0,
-        "y": 30
+        "w": 7,
+        "x": 12,
+        "y": 21
       },
       "id": 14,
       "options": {
@@ -1278,9 +1266,9 @@
       },
       "gridPos": {
         "h": 10,
-        "w": 12,
-        "x": 12,
-        "y": 30
+        "w": 7,
+        "x": 19,
+        "y": 21
       },
       "id": 17,
       "options": {
@@ -1365,18 +1353,6 @@
         }
       ],
       "type": "table"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 40
-      },
-      "id": 16,
-      "title": "By Author",
-      "type": "row"
     }
   ],
   "refresh": "30s",

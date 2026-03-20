@@ -13,6 +13,7 @@
 
 projects:
 
+# ── Java applications ──────────────────────────────────────────────────
 
   rdovgan/dungeon:
     language: java
@@ -183,25 +184,28 @@ projects:
       - security
       - bugs
 
+# ── Python applications ───────────────────────────────────
 
-  # ── Example: Java backend ──────────────────────────────────────────────────
-#  myworkspace/my-java-api:
-#    language: java
-#    ai_review: true
-#    static_analysis: true
-#    block_merge_on:
-#      - CRITICAL
-#    max_diff_lines: 500
-#    ignore_paths:
-#      - "migrations/*"
-#      - "**/*.generated.java"
-#    semgrep_rules:
-#      - owasp
-#      - security-audit
-#      - p/java
-#    ai_focus:
-#      - security
-#      - bugs
+  mybookingpal/image-tool:
+    language: python
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 500
+    ignore_paths:
+      - "migrations/*"
+      - "tests/*"
+      - "**/*_test.py"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/python
+      - p/django
+    ai_focus:
+      - security
+      - bugs
+
 
   # ── Example: React / TypeScript frontend ───────────────────────────────────
 #  myworkspace/my-react-frontend:

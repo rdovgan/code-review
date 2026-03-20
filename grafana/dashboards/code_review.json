@@ -12,13 +12,26 @@
       "title": "Reviews Today",
       "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
       "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "targets": [{ "expr": "round(increase(code_review_reviews_total[24h]))", "legendFormat": "{{status}}" }]
+      "targets": [{ "expr": "round(sum(increase(code_review_reviews_total{status!=\"skipped\"}[24h])))", "legendFormat": "reviewed" }]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Blocked Merges Today",
+      "description": "PRs where critical issues were found and merge is blocked",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+      },
+      "targets": [{ "expr": "round(increase(code_review_reviews_total{status=\"failure\"}[24h]))", "legendFormat": "blocked" }]
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Webhooks Today",
-      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
       "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [{ "expr": "round(increase(code_review_webhooks_total{status=\"queued\"}[24h]))", "legendFormat": "queued" }]
     },
@@ -26,7 +39,7 @@
       "id": 3,
       "type": "stat",
       "title": "Avg Review Duration",
-      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
       "options": { "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] }, "unit": "ms" },
       "targets": [{ "expr": "code_review_duration_milliseconds_sum / clamp_min(code_review_duration_milliseconds_count, 1)", "legendFormat": "avg ms" }]
     },
@@ -34,7 +47,7 @@
       "id": 4,
       "type": "stat",
       "title": "Critical Findings Today",
-      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
       "options": {
         "colorMode": "background",
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -46,7 +59,7 @@
       "id": 19,
       "type": "stat",
       "title": "Avg Findings per Review",
-      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 20, "y": 0, "w": 2, "h": 4 },
       "options": {
         "colorMode": "value",
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -61,7 +74,7 @@
       "id": 20,
       "type": "stat",
       "title": "Webhook Efficiency",
-      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "gridPos": { "x": 22, "y": 0, "w": 2, "h": 4 },
       "options": {
         "colorMode": "value",
         "reduceOptions": { "calcs": ["lastNotNull"] },
@@ -80,7 +93,7 @@
       "title": "Reviews per Hour",
       "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
       "options": { "legend": { "displayMode": "list" } },
-      "targets": [{ "expr": "increase(code_review_reviews_total[1h])", "legendFormat": "{{status}}" }]
+      "targets": [{ "expr": "increase(code_review_reviews_total{status!=\"skipped\"}[1h])", "legendFormat": "{{status}}" }]
     },
     {
       "id": 6,
@@ -122,7 +135,7 @@
       "type": "piechart",
       "title": "Review Outcomes",
       "gridPos": { "x": 21, "y": 12, "w": 3, "h": 8 },
-      "targets": [{ "expr": "code_review_reviews_total", "legendFormat": "{{status}}" }]
+      "targets": [{ "expr": "code_review_reviews_total{status!=\"skipped\"}", "legendFormat": "{{status}}" }]
     },
 
     {
@@ -157,7 +170,7 @@
         }
       ],
       "targets": [
-        { "expr": "sum by (language) (code_review_reviews_by_language_total)", "instant": true, "format": "table", "legendFormat": "" },
+        { "expr": "sum by (language) (code_review_reviews_by_language_total{status!=\"skipped\"})", "instant": true, "format": "table", "legendFormat": "" },
         { "expr": "code_review_findings_by_language_total{severity=\"critical\"}", "instant": true, "format": "table", "legendFormat": "" },
         { "expr": "code_review_findings_by_language_total{severity=\"bug\"}", "instant": true, "format": "table", "legendFormat": "" },
         { "expr": "code_review_findings_by_language_total{severity=\"performance\"}", "instant": true, "format": "table", "legendFormat": "" },

@@ -34,8 +34,16 @@ JSON schema: [{"severity": "...", "file": "...", "line": 42, "message": "...", "
 class AIReviewer:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         self._redis = redis.from_url(settings.REDIS_URL)
+
+        provider = settings.AI_PROVIDER.lower()
+        if provider == "glm":
+            from zai import ZaiClient
+            self._provider = "glm"
+            self._client = ZaiClient(api_key=settings.ZAI_API_KEY)
+        else:
+            self._provider = "claude"
+            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     def _budget_key(self) -> str:
         return f"ai_tokens:{date.today().isoformat()}"
@@ -107,6 +115,28 @@ class AIReviewer:
             source="ai",
         )
 
+    def _call_claude(self, prompt: str, chunk: str) -> tuple[str, int, int]:
+        response = self._client.messages.create(
+            model=self._settings.AI_MODEL,
+            max_tokens=self._settings.AI_MAX_TOKENS,
+            system=prompt,
+            messages=[{"role": "user", "content": chunk}],
+        )
+        text = response.content[0].text
+        return text, response.usage.input_tokens, response.usage.output_tokens
+
+    def _call_glm(self, prompt: str, chunk: str) -> tuple[str, int, int]:
+        response = self._client.chat.completions.create(
+            model=self._settings.GLM_MODEL,
+            max_tokens=self._settings.AI_MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": chunk},
+            ],
+        )
+        text = response.choices[0].message.content
+        return text, response.usage.prompt_tokens, response.usage.completion_tokens
+
     def review(self, pr_context: PRContext, config: ReviewConfig) -> list[Finding]:
         prompt = self._load_prompt(pr_context.language)
         chunks = self._split_if_needed(pr_context.diff)
@@ -119,14 +149,11 @@ class AIReviewer:
                     logger.warning("Daily AI token budget reached (%d), skipping AI review", used)
                     break
             try:
-                response = self._client.messages.create(
-                    model=self._settings.AI_MODEL,
-                    max_tokens=self._settings.AI_MAX_TOKENS,
-                    system=prompt,
-                    messages=[{"role": "user", "content": chunk}],
-                )
-                self._check_and_record_tokens(response.usage.input_tokens, response.usage.output_tokens)
-                text = response.content[0].text
+                if self._provider == "glm":
+                    text, input_tokens, output_tokens = self._call_glm(prompt, chunk)
+                else:
+                    text, input_tokens, output_tokens = self._call_claude(prompt, chunk)
+                self._check_and_record_tokens(input_tokens, output_tokens)
                 items = self._parse_response(text)
                 for item in items:
                     f = self._validate_finding(item)

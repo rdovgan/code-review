@@ -37,10 +37,11 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli set __hc__ 1 ex 5 > /dev/null || exit 1"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   prometheus:
     image: prom/prometheus:v2.52.0

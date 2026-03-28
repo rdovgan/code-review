@@ -38,9 +38,9 @@ class AIReviewer:
 
         provider = settings.AI_PROVIDER.lower()
         if provider == "glm":
-            from zai import ZaiClient
+            from openai import OpenAI
             self._provider = "glm"
-            self._client = ZaiClient(api_key=settings.ZAI_API_KEY)
+            self._client = OpenAI(api_key=settings.ZAI_API_KEY, base_url=settings.ZAI_BASE_URL)
         else:
             self._provider = "claude"
             self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)

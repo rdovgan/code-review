@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # GLM (Z.AI)
     ZAI_API_KEY: str = ""
-    ZAI_BASE_URL: str = "https://api.z.ai/api/paas/v4"
+    ZAI_BASE_URL: str = "https://api.z.ai/api/coding/paas/v4"
     GLM_MODEL: str = "glm-5-turbo"
 
     AI_MAX_TOKENS: int = 4096

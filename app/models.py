@@ -61,3 +61,45 @@ class ReviewConfig:
     semgrep_rules: list[str] = field(default_factory=lambda: ["owasp", "security-audit"])
     ai_focus: list[str] = field(default_factory=lambda: ["security", "bugs"])
     target_branches: list[str] = field(default_factory=lambda: ["master", "main"])
+
+
+class SPMScanCategory(str, Enum):
+    SECRET = "SECRET"
+    MISCONFIGURATION = "MISCONFIGURATION"
+    DEPENDENCY = "DEPENDENCY"
+
+
+@dataclass
+class SPMFinding:
+    category: SPMScanCategory
+    severity: Severity
+    file: str
+    line: int
+    message: str
+    suggestion: str
+    source: Literal["semgrep", "ai"]
+    rule_id: Optional[str] = None
+
+    @property
+    def dedup_key(self) -> str:
+        raw = f"{self.file}:{self.line}:{self.message[:50]}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+@dataclass
+class RepoPostureReport:
+    scan_id: str
+    platform: str
+    repo_full_name: str
+    scanned_at: str
+    status: str  # "pending" | "running" | "complete" | "error"
+    error: Optional[str] = None
+    findings: list[SPMFinding] = field(default_factory=list)
+    files_scanned: int = 0
+
+    @property
+    def summary(self) -> dict:
+        counts = {s.value: 0 for s in Severity}
+        for f in self.findings:
+            counts[f.severity.value] += 1
+        return counts

@@ -14,3 +14,9 @@ def get_adapter(platform: str, workspace: str, repo_slug: str, settings: Setting
             api_token=creds.get("api_token", ""),
         )
     raise ValueError(f"Unknown platform: {platform!r}")
+
+
+def get_spm_adapter(platform: str, access_key: str) -> GitPlatform:
+    if platform == "bitbucket":
+        return BitbucketAdapter(webhook_secret="", api_token=access_key)
+    raise ValueError(f"Unknown platform: {platform!r}")

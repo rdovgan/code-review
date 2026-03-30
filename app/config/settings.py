@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     MAX_DIFF_LINES: int = 500
     AI_DAILY_TOKEN_BUDGET: int = 100_000  # input+output tokens per day; 0 = unlimited
+    SPM_MAX_FILES_PER_REPO: int = 200
+    SPM_RESULT_TTL_SECONDS: int = 604800  # 7 days
 
 
 @lru_cache

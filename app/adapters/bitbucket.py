@@ -144,6 +144,39 @@ class BitbucketAdapter(GitPlatform):
                 comments.append({"id": str(c.get("id", "")), "body": raw})
         return comments
 
+    def _paginate(self, url: str, params: dict | None = None) -> list[dict]:
+        """Fetch all pages from a Bitbucket paginated endpoint and return all items."""
+        items = []
+        next_url: str | None = url
+        while next_url:
+            resp = self._client.get(next_url, params=params if next_url == url else None)
+            resp.raise_for_status()
+            data = resp.json()
+            items.extend(data.get("values", []))
+            next_url = data.get("next")
+        return items
+
+    def list_workspaces(self) -> list[str]:
+        items = self._paginate(f"{BITBUCKET_API}/2.0/workspaces", params={"pagelen": 100})
+        return [w["slug"] for w in items]
+
+    def list_repositories(self, workspace: str) -> list[dict]:
+        items = self._paginate(
+            f"{BITBUCKET_API}/2.0/repositories/{workspace}",
+            params={"pagelen": 100},
+        )
+        result = []
+        for repo in items:
+            mainbranch = (repo.get("mainbranch") or {}).get("name", "main")
+            result.append({"full_name": repo["full_name"], "mainbranch": mainbranch})
+        return result
+
+    def list_files(self, repo_full_name: str, ref: str, path: str = "") -> list[dict]:
+        workspace, repo = repo_full_name.split("/", 1)
+        url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/src/{ref}/{path}"
+        items = self._paginate(url, params={"pagelen": 100})
+        return [{"path": entry["path"], "type": entry["type"]} for entry in items]
+
     def set_review_status(self, pr_context: PRContext, state: str, description: str) -> bool:
         state_map = {"pending": "INPROGRESS", "success": "SUCCESSFUL", "failure": "FAILED"}
         bb_state = state_map.get(state, "INPROGRESS")

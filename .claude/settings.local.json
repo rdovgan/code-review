@@ -13,7 +13,10 @@
       "Bash(pytest tests/test_analyzers.py -v 2>&1)",
       "Bash(python3:*)",
       "Bash(docker compose:*)",
-      "Bash(docker ps:*)"
+      "Bash(docker ps:*)",
+      "Bash(python -m pytest tests/test_spm_scanner.py tests/test_spm_endpoints.py -v --tb=short)",
+      "Bash(git stash:*)",
+      "Bash(python -m pytest tests/test_worker.py -v --tb=short -m \"not integration\")"
     ]
   }
 }

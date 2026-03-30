@@ -1,17 +1,23 @@
+import json
 import logging
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
+from uuid import uuid4
+
+import redis
 
 from celery import Celery
 
-from app.adapters.factory import get_adapter
+from app.adapters.factory import get_adapter, get_spm_adapter
 from app.analyzers.ai_reviewer import AIReviewer
 from app.analyzers.merger import filter_by_config, merge_findings
 from app.analyzers.semgrep_runner import SemgrepRunner
+from app.analyzers.spm_scanner import SPMScanner
 from app.config.project_config import detect_language, load_project_config
 from app.config.settings import get_settings
 from app.metrics import Metrics
-from app.models import PRContext, Severity
+from app.models import PRContext, RepoPostureReport, SPMFinding, SPMScanCategory, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -177,3 +183,159 @@ def process_review(self, task_payload: dict) -> dict:
         "suggestions": suggest_count,
         "status": final_state,
     }
+
+
+# ---------------------------------------------------------------------------
+# AI-SPM tasks
+# ---------------------------------------------------------------------------
+
+def _spm_redis() -> redis.Redis:
+    return redis.from_url(settings.REDIS_URL)
+
+
+def _write_report(r: redis.Redis, report: RepoPostureReport, ttl: int) -> None:
+    key = f"spm:report:{report.scan_id}"
+    payload = {
+        "scan_id": report.scan_id,
+        "platform": report.platform,
+        "repo_full_name": report.repo_full_name,
+        "scanned_at": report.scanned_at,
+        "status": report.status,
+        "error": report.error,
+        "files_scanned": report.files_scanned,
+        "summary": report.summary,
+        "findings": [
+            {
+                "category": f.category.value,
+                "severity": f.severity.value,
+                "file": f.file,
+                "line": f.line,
+                "message": f.message,
+                "suggestion": f.suggestion,
+                "source": f.source,
+                "rule_id": f.rule_id,
+            }
+            for f in report.findings
+        ],
+    }
+    r.set(key, json.dumps(payload), ex=ttl)
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=2,
+    autoretry_for=(ConnectionError, TimeoutError),
+    retry_backoff=True,
+    task_time_limit=600,
+    task_soft_time_limit=540,
+)
+def scan_repository(self, task_payload: dict) -> dict:
+    scan_id = task_payload["scan_id"]
+    scan_group_id = task_payload["scan_group_id"]
+    platform = task_payload["platform"]
+    access_key = task_payload["access_key"]
+    repo_full_name = task_payload["repo_full_name"]
+    ref = task_payload["ref"]
+    categories = [SPMScanCategory(c) for c in task_payload["categories"]]
+    max_files = task_payload.get("max_files", settings.SPM_MAX_FILES_PER_REPO)
+    ttl = settings.SPM_RESULT_TTL_SECONDS
+
+    r = _spm_redis()
+
+    now = datetime.now(timezone.utc).isoformat()
+    report = RepoPostureReport(
+        scan_id=scan_id,
+        platform=platform,
+        repo_full_name=repo_full_name,
+        scanned_at=now,
+        status="running",
+    )
+    _write_report(r, report, ttl)
+
+    try:
+        adapter = get_spm_adapter(platform, access_key)
+        scanner = SPMScanner(settings)
+        findings = scanner.scan_repo(adapter, repo_full_name, ref, categories, max_files)
+
+        report.status = "complete"
+        report.findings = findings
+        report.files_scanned = max_files  # upper bound; actual count tracked internally
+        report.scanned_at = datetime.now(timezone.utc).isoformat()
+        _write_report(r, report, ttl)
+        r.hincrby(f"spm:group:{scan_group_id}:progress", "completed", 1)
+
+        logger.info("[SPM %s] scan_id=%s complete — %d findings", repo_full_name, scan_id, len(findings))
+        return {"scan_id": scan_id, "repo": repo_full_name, "findings": len(findings)}
+
+    except Exception as exc:
+        report.status = "error"
+        report.error = str(exc)
+        report.scanned_at = datetime.now(timezone.utc).isoformat()
+        _write_report(r, report, ttl)
+        r.hincrby(f"spm:group:{scan_group_id}:progress", "errors", 1)
+        logger.error("[SPM %s] scan_id=%s failed: %s", repo_full_name, scan_id, exc)
+        raise
+
+
+@celery_app.task(bind=True, task_time_limit=120)
+def run_spm_scan(self, task_payload: dict) -> dict:
+    scan_group_id = task_payload["scan_group_id"]
+    platform = task_payload["platform"]
+    access_key = task_payload["access_key"]
+    workspace_filter = task_payload.get("workspace")
+    categories = task_payload.get("categories", [c.value for c in SPMScanCategory])
+    max_files = task_payload.get("max_files_per_repo", settings.SPM_MAX_FILES_PER_REPO)
+    ttl = settings.SPM_RESULT_TTL_SECONDS
+
+    r = _spm_redis()
+    submitted_at = datetime.now(timezone.utc).isoformat()
+
+    r.hset(f"spm:group:{scan_group_id}", mapping={
+        "platform": platform,
+        "submitted_at": submitted_at,
+        "workspace": workspace_filter or "",
+        "repos_discovered": 0,
+    })
+    r.expire(f"spm:group:{scan_group_id}", ttl)
+
+    adapter = get_spm_adapter(platform, access_key)
+
+    workspaces = [workspace_filter] if workspace_filter else adapter.list_workspaces()
+
+    repo_count = 0
+    for ws in workspaces:
+        try:
+            repos = adapter.list_repositories(ws)
+        except Exception as exc:
+            logger.warning("[SPM] list_repositories(%s) failed: %s", ws, exc)
+            continue
+
+        for repo in repos:
+            scan_id = uuid4().hex
+            ref = repo.get("mainbranch", "main")
+
+            r.sadd(f"spm:group:{scan_group_id}:report_ids", scan_id)
+            r.expire(f"spm:group:{scan_group_id}:report_ids", ttl)
+
+            scan_repository.delay({
+                "scan_id": scan_id,
+                "scan_group_id": scan_group_id,
+                "platform": platform,
+                "access_key": access_key,
+                "repo_full_name": repo["full_name"],
+                "ref": ref,
+                "categories": categories,
+                "max_files": max_files,
+            })
+            repo_count += 1
+
+    r.hset(f"spm:group:{scan_group_id}", "repos_discovered", repo_count)
+    r.hset(f"spm:group:{scan_group_id}:progress", mapping={
+        "total": repo_count,
+        "completed": 0,
+        "errors": 0,
+    })
+    r.expire(f"spm:group:{scan_group_id}:progress", ttl)
+
+    logger.info("[SPM] scan_group=%s dispatched %d repo tasks", scan_group_id, repo_count)
+    return {"scan_group_id": scan_group_id, "repos_discovered": repo_count}

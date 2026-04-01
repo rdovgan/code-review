@@ -21,10 +21,32 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 2500
     ignore_paths:
       - "data/*"
       - "**/*.png"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+
+  mybookingpal/dataaccesslayer:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
     semgrep_rules:
       - owasp
       - security-audit
@@ -42,7 +64,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 2500
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -84,7 +106,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 1500
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -108,7 +130,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 2500
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -129,7 +151,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 1000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -149,10 +171,31 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 2500
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/parent-dal:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.sh"
     semgrep_rules:
       - owasp
       - security-audit
@@ -171,7 +214,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 2500
     ignore_paths:
       - "migrations/*"
       - "tests/*"

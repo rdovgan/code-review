@@ -1,6 +1,5 @@
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
 from celery import Celery
@@ -95,38 +94,23 @@ def process_review(self, task_payload: dict) -> dict:
     semgrep_results = []
     ai_results = []
 
-    analyzers_enabled = []
     if config.static_analysis:
-        analyzers_enabled.append("semgrep")
+        logger.info("%s Step 1/2: Static analysis started", pr_tag)
+        try:
+            semgrep_results = SemgrepRunner(config).run(pr_context, adapter)
+            logger.info("%s Step 1/2: Static analysis complete — %d finding(s)", pr_tag, len(semgrep_results))
+        except Exception as exc:
+            logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
+
     if config.ai_review:
-        analyzers_enabled.append("ai")
-
-    logger.info("%s Running analyzers: %s", pr_tag, ", ".join(analyzers_enabled) if analyzers_enabled else "none")
-
-    def _run_semgrep():
-        return SemgrepRunner(config).run(pr_context, adapter)
-
-    def _run_ai():
-        return AIReviewer(settings).review(pr_context, config)
-
-    futures_map = {}
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        if config.static_analysis:
-            futures_map[pool.submit(_run_semgrep)] = "semgrep"
-        if config.ai_review:
-            futures_map[pool.submit(_run_ai)] = "ai"
-
-        for future in as_completed(futures_map):
-            name = futures_map[future]
-            try:
-                result = future.result()
-                if name == "semgrep":
-                    semgrep_results = result
-                else:
-                    ai_results = result
-                logger.info("%s %s complete — %d finding(s)", pr_tag, name, len(result))
-            except Exception as exc:
-                logger.error("%s %s failed — %s", pr_tag, name, exc)
+        logger.info("%s Step 2/2: AI review started", pr_tag)
+        try:
+            ai_results = AIReviewer(settings).review(pr_context, config)
+            logger.info("%s Step 2/2: AI review complete — %d finding(s)", pr_tag, len(ai_results))
+        except Exception as exc:
+            logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)
+    else:
+        logger.info("%s Step 2/2: AI review skipped — disabled in config", pr_tag)
 
     findings = filter_by_config(merge_findings(semgrep_results, ai_results), config)
 

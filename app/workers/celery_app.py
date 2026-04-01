@@ -3,6 +3,8 @@ import time
 from dataclasses import asdict
 
 from celery import Celery
+from celery.exceptions import SoftTimeLimitExceeded
+from celery.signals import task_failure, task_revoked
 
 from app.adapters.factory import get_adapter
 from app.analyzers.ai_reviewer import AIReviewer
@@ -17,6 +19,19 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 metrics = Metrics(settings.REDIS_URL)
+
+
+@task_failure.connect(sender="app.workers.celery_app.process_review")
+def on_task_failure(sender, task_id, exception, **kwargs):
+    logger.error("Task %s failed with unhandled exception: %s", task_id, exception)
+    metrics.inc_webhook(status="error")
+
+
+@task_revoked.connect(sender="app.workers.celery_app.process_review")
+def on_task_revoked(sender, request, terminated, signum, expired, **kwargs):
+    reason = "timeout" if expired or signum else "revoked"
+    logger.error("Task %s %s (signal=%s)", request.id, reason, signum)
+    metrics.inc_webhook(status="error")
 
 celery_app = Celery(
     "code_review",
@@ -94,23 +109,43 @@ def process_review(self, task_payload: dict) -> dict:
     semgrep_results = []
     ai_results = []
 
-    if config.static_analysis:
-        logger.info("%s Step 1/2: Static analysis started", pr_tag)
-        try:
-            semgrep_results = SemgrepRunner(config).run(pr_context, adapter)
-            logger.info("%s Step 1/2: Static analysis complete — %d finding(s)", pr_tag, len(semgrep_results))
-        except Exception as exc:
-            logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
+    try:
+        if config.static_analysis:
+            logger.info("%s Step 1/2: Static analysis started", pr_tag)
+            try:
+                semgrep_results = SemgrepRunner(config).run(pr_context, adapter)
+                logger.info("%s Step 1/2: Static analysis complete — %d finding(s)", pr_tag, len(semgrep_results))
+            except Exception as exc:
+                logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
 
-    if config.ai_review:
-        logger.info("%s Step 2/2: AI review started", pr_tag)
+        if config.ai_review:
+            logger.info("%s Step 2/2: AI review started", pr_tag)
+            try:
+                ai_results = AIReviewer(settings).review(pr_context, config)
+                logger.info("%s Step 2/2: AI review complete — %d finding(s)", pr_tag, len(ai_results))
+            except Exception as exc:
+                logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)
+        else:
+            logger.info("%s Step 2/2: AI review skipped — disabled in config", pr_tag)
+
+    except SoftTimeLimitExceeded:
+        duration_ms = round((time.monotonic() - review_start) * 1000)
+        logger.error("%s Soft time limit exceeded after %dms — recording failure", pr_tag, duration_ms)
+        metrics.record_review(
+            status="failure",
+            duration_ms=duration_ms,
+            critical=0, bugs=0, perf=0, suggestions=0,
+            semgrep_count=len(semgrep_results),
+            ai_count=len(ai_results),
+            language=pr_context.language,
+            project=pr_context.repo_full_name,
+            author=pr_context.author,
+        )
         try:
-            ai_results = AIReviewer(settings).review(pr_context, config)
-            logger.info("%s Step 2/2: AI review complete — %d finding(s)", pr_tag, len(ai_results))
-        except Exception as exc:
-            logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)
-    else:
-        logger.info("%s Step 2/2: AI review skipped — disabled in config", pr_tag)
+            adapter.set_review_status(pr_context, "failure", "Review timed out")
+        except Exception:
+            pass
+        raise
 
     findings = filter_by_config(merge_findings(semgrep_results, ai_results), config)
 

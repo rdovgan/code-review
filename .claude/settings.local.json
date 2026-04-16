@@ -13,7 +13,9 @@
       "Bash(pytest tests/test_analyzers.py -v 2>&1)",
       "Bash(python3:*)",
       "Bash(docker compose:*)",
-      "Bash(docker ps:*)"
+      "Bash(docker ps:*)",
+      "Bash(ls -la /Users/rdovgan/Desktop/projects/work/code-review/.env*)",
+      "Bash(chmod +x:*)"
     ]
   }
 }

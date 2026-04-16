@@ -4,7 +4,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_secure_password_change_me}@redis:6379/0
     env_file:
       - .env
     volumes:
@@ -18,7 +18,7 @@ services:
   worker:
     build: .
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_secure_password_change_me}@redis:6379/0
     env_file:
       - .env
     volumes:
@@ -32,12 +32,12 @@ services:
   redis:
     image: redis:7.2-alpine
     ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes
+      - "127.0.0.1:6379:6379"
+    command: redis-server --appendonly yes --appendfsync everysec --requirepass ${REDIS_PASSWORD:-redis_secure_password_change_me}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli set __hc__ 1 ex 5 > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-redis_secure_password_change_me} set __hc__ 1 ex 5 > /dev/null || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10

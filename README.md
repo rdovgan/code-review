@@ -69,3 +69,19 @@ docker compose up --build -d
 ```
 
 See [PROJECTS.md](PROJECTS.md) for full setup instructions, including how to add projects and configure Bitbucket webhooks.
+
+---
+
+## Data Persistence & Backups
+
+**Important**: All review metrics and statistics are stored in Redis. To avoid data loss during redeploys:
+
+```bash
+# Before redeploying, always backup Redis
+./scripts/redis-backup.sh
+
+# Restore if needed
+./scripts/redis-restore.sh backups/redis/redis_backup_YYYYMMDD_HHMMSS.rdb
+```
+
+See [REDIS_BACKUPS.md](REDIS_BACKUPS.md) for detailed backup/restore procedures.

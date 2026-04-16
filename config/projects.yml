@@ -36,6 +36,97 @@ projects:
       - security
       - bugs
 
+  mybookingpal/mbp:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 5000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.csv"
+      - "**/*.xlsx"
+      - ".idea/**"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/channel-batch-jobs:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.csv"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/channel-integration:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 1500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.csv"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/core-module:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 4000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
 
   mybookingpal/dataaccesslayer:
     language: java

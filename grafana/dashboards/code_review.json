@@ -432,7 +432,7 @@
       "pluginVersion": "10.4.2",
       "targets": [
         {
-          "expr": "round(code_review_webhooks_total{status=\"queued\"} / clamp_min(sum(code_review_webhooks_total), 1) * 100, 1)",
+          "expr": "round(increase(code_review_webhooks_total{status=\"queued\"}[24h]) / clamp_min(sum(increase(code_review_webhooks_total[24h])), 1) * 100, 1)",
           "legendFormat": "% queued",
           "refId": "A"
         }

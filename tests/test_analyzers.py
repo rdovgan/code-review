@@ -152,7 +152,24 @@ def test_semgrep_on_fixture():
         author="dev",
         title="Test",
         language="java",
-        diff="",
+        diff="""diff --git a/UserService.java b/UserService.java
+index 123..456 789
+--- a/UserService.java
++++ b/UserService.java
+@@ -1,9 +1,9 @@
+
+ import java.sql.*;
+
+ public class UserService {
+     private Connection conn;
+
+     public void getUserByName(String username) throws SQLException {
+         Statement stmt = conn.createStatement();
+-        stmt.execute("SELECT * FROM users WHERE name = '" + username + "'");
++        stmt.execute("SELECT * FROM users WHERE name = '" + username + "'"); // SQL injection
+     }
+ }
+""",
         changed_files=["UserService.java"],
     )
     findings = runner.run(pr_context, mock_adapter)

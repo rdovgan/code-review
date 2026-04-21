@@ -9,6 +9,7 @@ from pathlib import Path
 from app.adapters.base import GitPlatform
 from app.config.settings import Settings
 from app.models import Finding, PRContext, ReviewConfig, Severity
+from app.utils.diff_parser import parse_diff_for_changed_lines
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ class SemgrepRunner:
         self._config = config
 
     def run(self, pr_context: PRContext, adapter: GitPlatform) -> list[Finding]:
+        changed_lines_map = parse_diff_for_changed_lines(pr_context.diff)
+        
         filtered_files = [
             f for f in pr_context.changed_files
             if not any(fnmatch.fnmatch(f, pat) for pat in self._config.ignore_paths)
@@ -97,15 +100,20 @@ class SemgrepRunner:
                 # Make path relative to tmp_dir
                 if path.startswith(tmp_dir):
                     path = path[len(tmp_dir):].lstrip("/")
-                findings.append(
-                    Finding(
-                        severity=severity,
-                        file=path,
-                        line=r.get("start", {}).get("line", 0),
-                        message=r.get("extra", {}).get("message", ""),
-                        suggestion=r.get("extra", {}).get("fix", ""),
-                        source="semgrep",
-                        rule_id=r.get("check_id"),
+                
+                line = r.get("start", {}).get("line", 0)
+                
+                # Only include findings on lines that were changed in the diff
+                if path in changed_lines_map and line in changed_lines_map[path]:
+                    findings.append(
+                        Finding(
+                            severity=severity,
+                            file=path,
+                            line=line,
+                            message=r.get("extra", {}).get("message", ""),
+                            suggestion=r.get("extra", {}).get("fix", ""),
+                            source="semgrep",
+                            rule_id=r.get("check_id"),
+                        )
                     )
-                )
             return findings

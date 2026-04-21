@@ -15,7 +15,8 @@
       "Bash(docker compose:*)",
       "Bash(docker ps:*)",
       "Bash(ls -la /Users/rdovgan/Desktop/projects/work/code-review/.env*)",
-      "Bash(chmod +x:*)"
+      "Bash(chmod +x:*)",
+      "Bash(pytest *)"
     ]
   }
 }

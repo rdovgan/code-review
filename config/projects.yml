@@ -11,6 +11,7 @@
 # To add a new project: copy any block below, change the repo key + settings,
 # then add a webhook in Bitbucket. No restart required.
 
+
 projects:
 
 # ── Java applications ──────────────────────────────────────────────────
@@ -37,6 +38,7 @@ projects:
       - bugs
 
   mybookingpal/mbp:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -62,6 +64,7 @@ projects:
       - bugs
 
   mybookingpal/channel-batch-jobs:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -85,6 +88,7 @@ projects:
       - bugs
 
   mybookingpal/channel-integration:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -108,6 +112,7 @@ projects:
       - bugs
 
   mybookingpal/core-module:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -129,6 +134,7 @@ projects:
       - bugs
 
   mybookingpal/dataaccesslayer:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -150,6 +156,7 @@ projects:
       - bugs
 
   mybookingpal/revpal:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -171,6 +178,7 @@ projects:
       - bugs
 
   mybookingpal/redis:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -192,6 +200,7 @@ projects:
       - bugs
 
   mybookingpal/payment:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -216,6 +225,7 @@ projects:
       - bugs
 
   mybookingpal/cassandra:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -237,6 +247,7 @@ projects:
       - bugs
 
   mybookingpal/mbp-utils:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -257,6 +268,7 @@ projects:
       - bugs
 
   mybookingpal/cloud-services:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -277,6 +289,7 @@ projects:
       - bugs
 
   mybookingpal/parent-dal:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
     static_analysis: true
@@ -300,6 +313,7 @@ projects:
 # ── Python applications ───────────────────────────────────
 
   mybookingpal/image-tool:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: python
     ai_review: true
     static_analysis: true

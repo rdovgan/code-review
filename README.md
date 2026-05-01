@@ -907,15 +907,34 @@ docker compose up --build
 
 ## Roadmap
 
-### Phase 3
-- [ ] GitHub adapter (`app/adapters/github.py`)
-- [ ] GitLab adapter (`app/adapters/gitlab.py`)
-- [ ] MySQL persistence (findings history, per-repo config storage)
-- [ ] Slack notifications (`slack_channel` in `ReviewConfig` already wired)
-- [ ] Grafana dashboard + metrics endpoint
+### Phase 1 — Foundation & Basic Pipeline ✓
+- [x] VPS Setup (Nginx, SSL, Redis, MySQL)
+- [x] Orchestrator Skeleton (FastAPI + webhook)
+- [x] Bitbucket Adapter
+- [x] Async Queue (Redis + Celery)
+- [x] Semgrep Integration (Java)
+- [x] End-to-End Test (Bitbucket)
 
-### Phase 4
-- [ ] Web UI for review history
-- [ ] Per-author statistics
-- [ ] Rate limiting + AI API budget alerts
-- [ ] Multi-tenant support
+### Phase 2 — AI Review ✓
+- [x] Claude API Integration
+- [x] Prompt Engineering
+- [x] Token Management
+- [x] Results Merge (dedup + sort)
+- [x] Incremental Review
+- [x] Calibration
+
+### Phase 3 — Multi-Platform & Multi-Language ✓
+- [x] GitHub Adapter (`app/adapters/github.py`)
+- [x] GitLab Adapter (`app/adapters/gitlab.py`)
+- [x] .NET (C#) Support (Semgrep rules + AI prompts)
+- [x] PHP Support (Semgrep + PHPStan + AI prompts)
+- [x] JavaScript/TypeScript Support (ESLint + Semgrep + AI prompts)
+- [x] Per-Project Config (`.codereview.yml` parser and override logic)
+
+### Phase 4 — Notifications, Monitoring, Go-Live
+- [ ] Slack Integration (post review summary, alert on CRITICAL)
+- [ ] MySQL Metrics Schema (store issues, PRs, accuracy, timing, cost)
+- [ ] Grafana Dashboard (issues per team, severity trends, API cost)
+- [ ] Rate Limiting & Cost Controls (budget alerts)
+- [ ] Documentation (README, `.codereview.yml` reference, runbook)
+- [ ] Go-Live (gradual rollout per department)

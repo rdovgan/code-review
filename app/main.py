@@ -78,16 +78,44 @@ async def health():
     return {"status": "ok", "redis": redis_status}
 
 
-def _extract_repo_info(payload: dict) -> tuple[str, str]:
-    """Return (workspace, repo_slug) from a Bitbucket webhook payload."""
-    full_name = (
-        payload.get("pullrequest", {})
-        .get("destination", {})
-        .get("repository", {})
-        .get("full_name", "")
-    )
+def _extract_repo_info(payload: dict, platform: str) -> tuple[str, str]:
+    """Return (workspace, repo_slug) from a webhook payload."""
+    if platform == "bitbucket":
+        full_name = (
+            payload.get("pullrequest", {})
+            .get("destination", {})
+            .get("repository", {})
+            .get("full_name", "")
+        )
+    elif platform == "github":
+        full_name = payload.get("repository", {}).get("full_name", "")
+    elif platform == "gitlab":
+        full_name = payload.get("project", {}).get("path_with_namespace", "")
+    else:
+        return ("", "")
     parts = full_name.split("/", 1)
     return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
+
+
+def _queue_review(pr_context: PRContext, platform: str) -> JSONResponse:
+    """Deduplicate and queue a review task."""
+    dedup_key = f"review_lock:{pr_context.repo_full_name}:{pr_context.pr_id}"
+    try:
+        r = aioredis.from_url(settings.REDIS_URL)
+        acquired = await r.set(dedup_key, "1", nx=True, ex=300)  # 5 min = task time limit
+        await r.aclose()
+    except Exception as exc:
+        logger.warning("redis_lock_failed", error=str(exc))
+        metrics.inc_webhook("error")
+        return JSONResponse(status_code=503, content={"error": "redis_unavailable"})
+    if not acquired:
+        metrics.inc_webhook("already_queued")
+        return JSONResponse(status_code=200, content={"status": "already_queued"})
+
+    task_payload = {"platform": platform, "diff": "", **asdict(pr_context)}
+    task = process_review.delay(task_payload)
+    metrics.inc_webhook("queued")
+    return JSONResponse(status_code=202, content={"status": "queued", "task_id": task.id})
 
 
 @app.post("/webhook/bitbucket")
@@ -99,7 +127,7 @@ async def webhook_bitbucket(request: Request):
     except json.JSONDecodeError:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
-    workspace, repo_slug = _extract_repo_info(payload)
+    workspace, repo_slug = _extract_repo_info(payload, "bitbucket")
     if not workspace or not repo_slug:
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
@@ -122,21 +150,74 @@ async def webhook_bitbucket(request: Request):
         metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    # Deduplicate: skip if this PR is already queued or running (60s window)
-    dedup_key = f"review_lock:{pr_context.repo_full_name}:{pr_context.pr_id}"
-    try:
-        r = aioredis.from_url(settings.REDIS_URL)
-        acquired = await r.set(dedup_key, "1", nx=True, ex=300)  # 5 min = task time limit
-        await r.aclose()
-    except Exception as exc:
-        logger.warning("redis_lock_failed", error=str(exc))
-        metrics.inc_webhook("error")
-        return JSONResponse(status_code=503, content={"error": "redis_unavailable"})
-    if not acquired:
-        metrics.inc_webhook("already_queued")
-        return JSONResponse(status_code=200, content={"status": "already_queued"})
+    return _queue_review(pr_context, "bitbucket")
 
-    task_payload = {"platform": "bitbucket", "diff": "", **asdict(pr_context)}
-    task = process_review.delay(task_payload)
-    metrics.inc_webhook("queued")
-    return JSONResponse(status_code=202, content={"status": "queued", "task_id": task.id})
+
+@app.post("/webhook/github")
+async def webhook_github(request: Request):
+    body = await request.body()
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    workspace, repo_slug = _extract_repo_info(payload, "github")
+    if not workspace or not repo_slug:
+        return JSONResponse(status_code=200, content={"status": "ignored"})
+
+    try:
+        adapter = get_adapter("github", workspace, repo_slug, settings)
+    except ValueError as exc:
+        logger.warning("no_credentials", workspace=workspace, repo=repo_slug, error=str(exc))
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    if not adapter.validate_webhook(body, dict(request.headers)):
+        return JSONResponse(status_code=401, content={"error": "Invalid signature"})
+
+    event_type = request.headers.get("x-github-event", "")
+    if event_type and event_type not in ("pull_request", "issue_comment"):
+        metrics.inc_webhook("ignored")
+        return JSONResponse(status_code=200, content={"status": "ignored", "reason": "event_not_reviewable"})
+
+    pr_context = adapter.parse_webhook(payload)
+    if pr_context is None:
+        metrics.inc_webhook("ignored")
+        return JSONResponse(status_code=200, content={"status": "ignored"})
+
+    return _queue_review(pr_context, "github")
+
+
+@app.post("/webhook/gitlab")
+async def webhook_gitlab(request: Request):
+    body = await request.body()
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    workspace, repo_slug = _extract_repo_info(payload, "gitlab")
+    if not workspace or not repo_slug:
+        return JSONResponse(status_code=200, content={"status": "ignored"})
+
+    try:
+        adapter = get_adapter("gitlab", workspace, repo_slug, settings)
+    except ValueError as exc:
+        logger.warning("no_credentials", workspace=workspace, repo=repo_slug, error=str(exc))
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    if not adapter.validate_webhook(body, dict(request.headers)):
+        return JSONResponse(status_code=401, content={"error": "Invalid signature"})
+
+    object_kind = payload.get("object_kind", "")
+    if object_kind and object_kind != "merge_request":
+        metrics.inc_webhook("ignored")
+        return JSONResponse(status_code=200, content={"status": "ignored", "reason": "event_not_reviewable"})
+
+    pr_context = adapter.parse_webhook(payload)
+    if pr_context is None:
+        metrics.inc_webhook("ignored")
+        return JSONResponse(status_code=200, content={"status": "ignored"})
+
+    return _queue_review(pr_context, "gitlab")

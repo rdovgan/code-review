@@ -22,10 +22,9 @@ def _load() -> dict:
 
 def get_credentials(platform: str, workspace: str, repo_slug: str) -> dict:
     """
-    Return {username, app_password, webhook_secret} for the given repo.
-    username and app_password come from the workspace block.
-    webhook_secret comes from the repository block within that workspace.
-    Raises ValueError with a descriptive message if anything is missing.
+    Return credentials dict for the given repo.
+    For bitbucket: {username, app_password, webhook_secret, api_token}
+    For github/gitlab: {api_token, webhook_secret}
     """
     data = _load()
     workspaces = data.get(platform, {}).get("workspaces", {})
@@ -52,18 +51,20 @@ def get_credentials(platform: str, workspace: str, repo_slug: str) -> dict:
             f"Repository '{workspace}/{repo_slug}' is missing 'webhook_secret' in config/credentials.yml."
         )
 
-    # Auth priority: repo-level api_token → workspace-level api_token → workspace username+app_password
+    # Auth priority: repo-level api_token → workspace-level api_token
     if repo.get("api_token"):
         api_creds = {"api_token": repo["api_token"]}
     elif ws.get("api_token"):
         api_creds = {"api_token": ws["api_token"]}
-    elif ws.get("username") and ws.get("app_password"):
+    elif platform == "bitbucket" and ws.get("username") and ws.get("app_password"):
         api_creds = {"username": ws["username"], "app_password": ws["app_password"]}
     else:
         raise ValueError(
             f"No API credentials found for '{workspace}/{repo_slug}'. "
-            f"Add 'api_token' to the repository, 'api_token' to the workspace, "
-            f"or 'username'+'app_password' to the workspace in config/credentials.yml."
+            f"Add 'api_token' to the repository or workspace in config/credentials.yml."
         )
 
-    return {**api_creds, "webhook_secret": repo["webhook_secret"]}
+    result = {**api_creds, "webhook_secret": repo["webhook_secret"]}
+    if ws.get("base_url"):
+        result["base_url"] = ws["base_url"]
+    return result

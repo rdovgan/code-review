@@ -92,14 +92,14 @@ docker compose up --build
 2. Register it in `get_adapter()` in `app/adapters/factory.py`
 3. Add `POST /webhook/<platform>` route in `app/main.py`
 4. Add tests in `tests/test_adapters.py`
-5. Document the webhook setup in `PROJECTS.md`
+5. Document the webhook setup in `README.md`
 
 ## How to Add a New Language
 
 1. Create `prompts/<language>_prompt.md` — include language-specific CRITICAL/BUG examples
 2. Add extension mappings to `_EXT_TO_LANG` in `app/config/project_config.py`
 3. Add a Semgrep rule mapping to `SEMGREP_RULE_MAP` in `app/analyzers/semgrep_runner.py`
-4. Add a quick-reference config block in `PROJECTS.md`
+4. Add a quick-reference config block in `README.md`
 
 ## Key Design Decisions
 

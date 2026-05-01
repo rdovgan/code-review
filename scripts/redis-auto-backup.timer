@@ -1,0 +1,15 @@
+# Redis auto-backup timer (systemd)
+# Install: sudo cp scripts/redis-auto-backup.* /etc/systemd/system/
+# Enable: sudo systemctl enable redis-auto-backup.timer
+# Start: sudo systemctl start redis-auto-backup.timer
+
+[Unit]
+Description=Run Redis backup every hour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

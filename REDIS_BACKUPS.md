@@ -1,19 +1,35 @@
 # Redis Backups & Persistence
 
+## Quick Setup
+
+Run the setup script to configure everything:
+
+```bash
+./scripts/setup-redis-persistence.sh
+```
+
 ## Configuration
 
 Redis is configured with:
 - **AOF (Append Only File)**: Enabled, syncs every second
+- **RDB Snapshots**: Automatic every 15min (1 change), 5min (10 changes), 1min (10000 changes)
 - **Password protection**: Enabled (set `REDIS_PASSWORD` in `.env`)
 - **Network access**: Localhost only (`127.0.0.1:6379`)
 - **Volume persistence**: Docker volume `redis_data` mounted to `/data`
+- **Auto-restore**: Automatically restores from latest backup on container recreation
 
-## Before Redeploy
+## Auto-Restore on Reboot
 
-Always backup Redis data before redeploying:
+Redis now automatically restores data on container recreation:
+1. On container start, checks for existing data in `/data`
+2. If no data found, looks for latest backup in `/backups/redis/`
+3. Automatically restores the most recent `redis_backup_*.rdb` file
+4. Starts Redis with restored data
+
+## Manual Backup
 
 ```bash
-# Manual backup
+# Create backup manually
 ./scripts/redis-backup.sh
 
 # Or trigger SAVE from within Redis
@@ -22,11 +38,28 @@ docker compose exec redis redis-cli -a $REDIS_PASSWORD SAVE
 
 ## Automated Backups
 
-Add to crontab for daily backups:
+### Option 1: Cron (macOS/Linux)
+
+Add to crontab for hourly backups:
 
 ```bash
-# Daily backup at 2 AM
-0 2 * * * cd /path/to/code-review && ./scripts/redis-backup.sh >> /var/log/redis-backup.log 2>&1
+# Edit crontab
+crontab -e
+
+# Add this line (hourly backups)
+0 * * * * cd /path/to/code-review && ./scripts/redis-backup.sh >> logs/redis-backup.log 2>&1
+```
+
+### Option 2: Systemd Timer (Linux)
+
+```bash
+# Install service and timer
+sudo cp scripts/redis-auto-backup.* /etc/systemd/system/
+sudo systemctl enable redis-auto-backup.timer
+sudo systemctl start redis-auto-backup.timer
+
+# Check status
+systemctl status redis-auto-backup.timer
 ```
 
 ## Restore from Backup
@@ -35,7 +68,7 @@ Add to crontab for daily backups:
 # List available backups
 ls -la backups/redis/
 
-# Restore specific backup
+# Manual restore (if auto-restore doesn't work)
 ./scripts/redis-restore.sh backups/redis/redis_backup_20240328_120000.rdb
 ```
 
@@ -43,13 +76,14 @@ ls -la backups/redis/
 
 Your metrics will survive:
 - ✅ Container restarts
-- ✅ Server reboots (with Docker volume)
-- ✅ App redeploys (if you backup first)
+- ✅ Server reboots (with Docker volume + auto-restore)
+- ✅ App redeploys (automatic backup before redeploy recommended)
+- ✅ Container recreation (auto-restore from latest backup)
 
 Your metrics will NOT survive:
 - ❌ Volume deletion (`docker compose down -v`)
 - ❌ Manual Redis FLUSHALL
-- ❌ Container recreation without backup
+- ❌ Deleting backups/redis/ directory
 
 ## Monitoring Metrics Retention
 

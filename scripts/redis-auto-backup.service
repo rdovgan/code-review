@@ -1,0 +1,10 @@
+[Unit]
+Description=Redis backup service for code-review
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/Users/rdovgan/Desktop/projects/work/code-review
+ExecStart=/Users/rdovgan/Desktop/projects/work/code-review/scripts/redis-backup.sh
+User=rdovgan

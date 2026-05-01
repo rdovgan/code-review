@@ -1,6 +1,6 @@
 #!/bin/bash
 # Backup Redis data to host filesystem
-# Run this before redeploy: docker compose exec redis redis-cli SAVE
+# Works both inside container (via /backups mount) and from host
 
 set -e
 
@@ -13,11 +13,18 @@ echo "Creating Redis backup..."
 # Create backup directory if it doesn't exist
 mkdir -p "$BACKUP_DIR"
 
-# Trigger Redis SAVE command to create .rdb file
-docker compose exec -T redis redis-cli -a "${REDIS_PASSWORD:-redis_secure_password_change_me}" SAVE
+# Check if running inside container or from host
+if [ -f "/data/dump.rdb" ]; then
+    # Inside container - copy directly
+    cp /data/dump.rdb "$BACKUP_DIR/$BACKUP_FILE"
+else
+    # From host - use docker compose
+    # Trigger Redis SAVE command to create .rdb file
+    docker compose exec -T redis redis-cli -a "${REDIS_PASSWORD:-redis_secure_password_change_me}" SAVE
 
-# Copy the .rdb file from container to host
-docker cp code-review-redis-1:/data/dump.rdb "$BACKUP_DIR/$BACKUP_FILE"
+    # Copy the .rdb file from container to host
+    docker cp code-review-redis-1:/data/dump.rdb "$BACKUP_DIR/$BACKUP_FILE"
+fi
 
 echo "Backup saved to: $BACKUP_DIR/$BACKUP_FILE"
 echo "Latest 5 backups:"

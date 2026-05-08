@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from app.adapters.factory import get_adapter
 from app.config.settings import get_settings
 from app.metrics import Metrics
-from app.workers.celery_app import process_review
+from app.workers.celery_app import process_review, _BASE_SOFT_TIME_LIMIT, _BASE_TIME_LIMIT, _EXTRA_SECONDS_PER_FILE
 
 structlog.configure(
     processors=[
@@ -97,12 +97,12 @@ def _extract_repo_info(payload: dict, platform: str) -> tuple[str, str]:
     return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
 
 
-def _queue_review(pr_context: PRContext, platform: str) -> JSONResponse:
-    """Deduplicate and queue a review task."""
+async def _queue_review(pr_context, platform: str) -> JSONResponse:
+    """Deduplicate and queue a review task with dynamic time limits."""
     dedup_key = f"review_lock:{pr_context.repo_full_name}:{pr_context.pr_id}"
     try:
         r = aioredis.from_url(settings.REDIS_URL)
-        acquired = await r.set(dedup_key, "1", nx=True, ex=300)  # 5 min = task time limit
+        acquired = await r.set(dedup_key, "1", nx=True, ex=720)  # match global hard time limit
         await r.aclose()
     except Exception as exc:
         logger.warning("redis_lock_failed", error=str(exc))
@@ -113,7 +113,15 @@ def _queue_review(pr_context: PRContext, platform: str) -> JSONResponse:
         return JSONResponse(status_code=200, content={"status": "already_queued"})
 
     task_payload = {"platform": platform, "diff": "", **asdict(pr_context)}
-    task = process_review.delay(task_payload)
+    # Scale time limits by number of changed files
+    file_count = len(pr_context.changed_files) if pr_context.changed_files else 10
+    soft_limit = _BASE_SOFT_TIME_LIMIT + file_count * _EXTRA_SECONDS_PER_FILE
+    hard_limit = _BASE_TIME_LIMIT + file_count * _EXTRA_SECONDS_PER_FILE
+    task = process_review.apply_async(
+        args=[task_payload],
+        soft_time_limit=soft_limit,
+        time_limit=hard_limit,
+    )
     metrics.inc_webhook("queued")
     return JSONResponse(status_code=202, content={"status": "queued", "task_id": task.id})
 
@@ -150,7 +158,7 @@ async def webhook_bitbucket(request: Request):
         metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    return _queue_review(pr_context, "bitbucket")
+    return await _queue_review(pr_context, "bitbucket")
 
 
 @app.post("/webhook/github")
@@ -185,7 +193,7 @@ async def webhook_github(request: Request):
         metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    return _queue_review(pr_context, "github")
+    return await _queue_review(pr_context, "github")
 
 
 @app.post("/webhook/gitlab")
@@ -220,4 +228,4 @@ async def webhook_gitlab(request: Request):
         metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    return _queue_review(pr_context, "gitlab")
+    return await _queue_review(pr_context, "gitlab")

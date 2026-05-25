@@ -4,7 +4,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import GitPlatform
+from app.adapters.base import BOT_MARKER, GitPlatform
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class GitlabAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         project = self._encode_project(pr_context.repo_full_name)
         url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/discussions"
-        body = f"**[{finding.severity.value}]** {finding.message}"
+        body = f"{BOT_MARKER}\n**[{finding.severity.value}]** {finding.message}"
         if finding.suggestion:
             body += f"\n\n💡 {finding.suggestion}"
         payload = {
@@ -113,7 +113,7 @@ class GitlabAdapter(GitPlatform):
     def post_summary_comment(self, pr_context: PRContext, body: str) -> str:
         project = self._encode_project(pr_context.repo_full_name)
         url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/notes"
-        resp = self._client.post(url, json={"body": body})
+        resp = self._client.post(url, json={"body": f"{BOT_MARKER}\n{body}"})
         resp.raise_for_status()
         return str(resp.json().get("id", ""))
 
@@ -138,7 +138,7 @@ class GitlabAdapter(GitPlatform):
         resp.raise_for_status()
         for c in resp.json():
             body = c.get("body", "")
-            if any(marker in body for marker in ["## AI Code Review Summary", "**[CRITICAL]**", "**[BUG]**", "**[PERFORMANCE]**", "**[SUGGEST]**"]):
+            if BOT_MARKER in body:
                 comments.append({"id": f"note:{c.get('id')}", "body": body})
         url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/discussions"
         resp = self._client.get(url)
@@ -146,7 +146,7 @@ class GitlabAdapter(GitPlatform):
             for d in resp.json():
                 for note in d.get("notes", []):
                     body = note.get("body", "")
-                    if any(marker in body for marker in ["**[CRITICAL]**", "**[BUG]**", "**[PERFORMANCE]**", "**[SUGGEST]**"]):
+                    if BOT_MARKER in body:
                         comments.append({"id": f"discussion:{d.get('id')}", "body": body})
         return comments
 

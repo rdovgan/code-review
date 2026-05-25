@@ -97,7 +97,7 @@ def _extract_repo_info(payload: dict, platform: str) -> tuple[str, str]:
     return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
 
 
-def _queue_review(pr_context: PRContext, platform: str) -> JSONResponse:
+async def _queue_review(pr_context: PRContext, platform: str) -> JSONResponse:
     """Deduplicate and queue a review task."""
     dedup_key = f"review_lock:{pr_context.repo_full_name}:{pr_context.pr_id}"
     try:
@@ -150,7 +150,7 @@ async def webhook_bitbucket(request: Request):
         metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    return _queue_review(pr_context, "bitbucket")
+    return await _queue_review(pr_context, "bitbucket")
 
 
 @app.post("/webhook/github")
@@ -185,7 +185,7 @@ async def webhook_github(request: Request):
         metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    return _queue_review(pr_context, "github")
+    return await _queue_review(pr_context, "github")
 
 
 @app.post("/webhook/gitlab")
@@ -220,4 +220,4 @@ async def webhook_gitlab(request: Request):
         metrics.inc_webhook("ignored")
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    return _queue_review(pr_context, "gitlab")
+    return await _queue_review(pr_context, "gitlab")

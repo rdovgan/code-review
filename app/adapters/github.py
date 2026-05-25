@@ -4,7 +4,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import GitPlatform, hmac_verify
+from app.adapters.base import BOT_MARKER, GitPlatform, hmac_verify
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class GithubAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         owner, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_context.pr_id}/comments"
-        body = f"**[{finding.severity.value}]** {finding.message}"
+        body = f"{BOT_MARKER}\n**[{finding.severity.value}]** {finding.message}"
         if finding.suggestion:
             body += f"\n\n💡 {finding.suggestion}"
         payload = {
@@ -117,7 +117,7 @@ class GithubAdapter(GitPlatform):
     def post_summary_comment(self, pr_context: PRContext, body: str) -> str:
         owner, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{GITHUB_API}/repos/{owner}/{repo}/issues/{pr_context.pr_id}/comments"
-        resp = self._client.post(url, json={"body": body})
+        resp = self._client.post(url, json={"body": f"{BOT_MARKER}\n{body}"})
         resp.raise_for_status()
         return str(resp.json().get("id", ""))
 
@@ -142,14 +142,14 @@ class GithubAdapter(GitPlatform):
         resp.raise_for_status()
         for c in resp.json():
             body = c.get("body", "")
-            if any(marker in body for marker in ["## AI Code Review Summary", "**[CRITICAL]**", "**[BUG]**", "**[PERFORMANCE]**", "**[SUGGEST]**"]):
+            if BOT_MARKER in body:
                 comments.append({"id": f"review:{c.get('id')}", "body": body})
         url = f"{GITHUB_API}/repos/{owner}/{repo}/issues/{pr_context.pr_id}/comments"
         resp = self._client.get(url)
         resp.raise_for_status()
         for c in resp.json():
             body = c.get("body", "")
-            if "## AI Code Review Summary" in body:
+            if BOT_MARKER in body:
                 comments.append({"id": f"issue:{c.get('id')}", "body": body})
         return comments
 

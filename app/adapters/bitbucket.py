@@ -3,7 +3,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import GitPlatform, hmac_verify
+from app.adapters.base import BOT_MARKER, GitPlatform, hmac_verify
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,16 @@ class BitbucketAdapter(GitPlatform):
             text = comment.get("content", {}).get("raw", "").strip().lower()
             if text != "review":
                 return None
+
+        # For pullrequest:updated events: only process when source commits changed.
+        # Bitbucket sets payload["changes"] on update events:
+        #   - New commits  → changes contains "source" key (old/new commit hashes)
+        #   - Reviewer add → changes contains "reviewers" but NO "source"
+        #   - Title/desc   → changes contains "title"/"description" but NO "source"
+        changes = payload.get("changes")
+        if changes is not None and "source" not in changes:
+            logger.info("Skipping PR update: no source commit change (likely reviewer/metadata update)")
+            return None
 
         state = pr.get("state", "")
         if state != "OPEN":
@@ -107,7 +117,7 @@ class BitbucketAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        body = f"**[{finding.severity.value}]** {finding.message}"
+        body = f"{BOT_MARKER}\n**[{finding.severity.value}]** {finding.message}"
         if finding.suggestion:
             body += f"\n\n💡 {finding.suggestion}"
         payload = {
@@ -121,7 +131,7 @@ class BitbucketAdapter(GitPlatform):
     def post_summary_comment(self, pr_context: PRContext, body: str) -> str:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        payload = {"content": {"raw": body}}
+        payload = {"content": {"raw": f"{BOT_MARKER}\n{body}"}}
         resp = self._client.post(url, json=payload)
         resp.raise_for_status()
         return str(resp.json().get("id", ""))
@@ -140,7 +150,7 @@ class BitbucketAdapter(GitPlatform):
         comments = []
         for c in resp.json().get("values", []):
             raw = c.get("content", {}).get("raw", "")
-            if "## AI Code Review Summary" in raw or raw.startswith("**[CRITICAL]**") or raw.startswith("**[BUG]**") or raw.startswith("**[PERFORMANCE]**") or raw.startswith("**[SUGGEST]**"):
+            if BOT_MARKER in raw:
                 comments.append({"id": str(c.get("id", "")), "body": raw})
         return comments
 

@@ -137,10 +137,22 @@ class AIReviewer:
         text = response.choices[0].message.content
         return text, response.usage.prompt_tokens, response.usage.completion_tokens
 
+    # Circuit breaker: stop AI review after N consecutive parse failures
+    _MAX_CONSECUTIVE_PARSE_FAILURES = 2
+    # Cap on number of AI chunks to process (prevents runaway costs on huge PRs)
+    _MAX_CHUNKS = 15
+
     def review(self, pr_context: PRContext, config: ReviewConfig) -> list[Finding]:
         prompt = self._load_prompt(pr_context.language)
         chunks = self._split_if_needed(pr_context.diff)
+        if len(chunks) > self._MAX_CHUNKS:
+            logger.warning(
+                "Diff produced %d chunks, capping at %d to avoid runaway AI calls",
+                len(chunks), self._MAX_CHUNKS,
+            )
+            chunks = chunks[:self._MAX_CHUNKS]
         findings: list[Finding] = []
+        consecutive_parse_failures = 0
         for chunk in chunks:
             # Pre-check budget before sending
             if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
@@ -148,6 +160,13 @@ class AIReviewer:
                 if used >= self._settings.AI_DAILY_TOKEN_BUDGET:
                     logger.warning("Daily AI token budget reached (%d), skipping AI review", used)
                     break
+            # Circuit breaker: too many consecutive bad responses → stop
+            if consecutive_parse_failures >= self._MAX_CONSECUTIVE_PARSE_FAILURES:
+                logger.error(
+                    "AI parse failure circuit breaker tripped (%d consecutive), aborting AI review",
+                    consecutive_parse_failures,
+                )
+                break
             try:
                 if self._provider == "glm":
                     text, input_tokens, output_tokens = self._call_glm(prompt, chunk)
@@ -155,10 +174,15 @@ class AIReviewer:
                     text, input_tokens, output_tokens = self._call_claude(prompt, chunk)
                 self._check_and_record_tokens(input_tokens, output_tokens)
                 items = self._parse_response(text)
+                if not items:
+                    consecutive_parse_failures += 1
+                else:
+                    consecutive_parse_failures = 0
                 for item in items:
                     f = self._validate_finding(item)
                     if f:
                         findings.append(f)
             except Exception as exc:
                 logger.error("AI review chunk failed: %s", exc)
+                consecutive_parse_failures += 1
         return findings

@@ -33,6 +33,11 @@ def on_task_revoked(sender, request, terminated, signum, expired, **kwargs):
     logger.error("Task %s %s (signal=%s)", request.id, reason, signum)
     metrics.inc_webhook(status="error")
 
+# Base time limits — dynamically scaled per task in process_review()
+_BASE_SOFT_TIME_LIMIT = 240   # 4 min base
+_BASE_TIME_LIMIT = 300        # 5 min base
+_EXTRA_SECONDS_PER_FILE = 5   # add 5s per file for large PRs
+
 celery_app = Celery(
     "code_review",
     broker=settings.REDIS_URL,
@@ -44,8 +49,9 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
-    task_time_limit=300,       # kill task after 5 min — prevents hung workers
-    task_soft_time_limit=240,  # give task 4 min to finish gracefully
+    # Global safety net — individual tasks override via apply_async
+    task_time_limit=720,
+    task_soft_time_limit=660,
 )
 
 

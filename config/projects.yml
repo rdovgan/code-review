@@ -11,26 +11,328 @@
 # To add a new project: copy any block below, change the repo key + settings,
 # then add a webhook in Bitbucket. No restart required.
 
+
 projects:
 
-  # ── Example: Java backend ──────────────────────────────────────────────────
-#  myworkspace/my-java-api:
-#    language: java
-#    ai_review: true
-#    static_analysis: true
-#    block_merge_on:
-#      - CRITICAL
-#    max_diff_lines: 500
-#    ignore_paths:
-#      - "migrations/*"
-#      - "**/*.generated.java"
-#    semgrep_rules:
-#      - owasp
-#      - security-audit
-#      - p/java
-#    ai_focus:
-#      - security
-#      - bugs
+# ── Java applications ──────────────────────────────────────────────────
+
+  rdovgan/pathminer:
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "data/*"
+      - "**/*.png"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/mbp:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 5000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.csv"
+      - "**/*.xlsx"
+      - ".idea/**"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/channel-batch-jobs:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.csv"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/channel-integration:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 1500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.csv"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/core-module:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 4000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/dataaccesslayer:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/revpal:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/redis:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/payment:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 1500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.png"
+      - "**/*.xml"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/cassandra:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/mbp-utils:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 1000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/cloud-services:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/parent-dal:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.sh"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+# ── Python applications ───────────────────────────────────
+
+  mybookingpal/image-tool:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: python
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 2500
+    ignore_paths:
+      - "migrations/*"
+      - "tests/*"
+      - "**/*_test.py"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/python
+      - p/django
+    ai_focus:
+      - security
+      - bugs
+
 
   # ── Example: React / TypeScript frontend ───────────────────────────────────
 #  myworkspace/my-react-frontend:

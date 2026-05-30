@@ -371,36 +371,50 @@
       "type": "stat"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "description": "Percentage of reviews that completed successfully (no blocking issues)",
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [],
+          "max": 100,
+          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "green",
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "percent"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 2,
         "x": 20,
         "y": 0
       },
       "id": 20,
       "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
+        "minVizHeight": 75,
+        "minVizWidth": 75,
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
@@ -409,36 +423,116 @@
           "fields": "",
           "values": false
         },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "thresholds": {
-          "steps": [
-            {
-              "color": "red"
-            },
-            {
-              "color": "orange",
-              "value": 20
-            },
-            {
-              "color": "green",
-              "value": 50
-            }
-          ]
-        },
-        "unit": "percent",
-        "wideLayout": true
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
       },
       "pluginVersion": "10.4.2",
       "targets": [
         {
-          "expr": "round(increase(code_review_webhooks_total{status=\"queued\"}[24h]) / clamp_min(sum(increase(code_review_webhooks_total[24h])), 1) * 100, 1)",
-          "legendFormat": "% queued",
+          "expr": "round(sum(code_review_reviews_total{status=\"success\"}) / clamp_min(sum(code_review_reviews_total{status!=\"skipped\"}), 1) * 100, 1)",
+          "legendFormat": "",
           "refId": "A"
         }
       ],
-      "title": "Webhook Efficiency",
-      "type": "stat"
+      "title": "Review Success Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "description": "Breakdown of all webhook requests by processing status",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": [
+            {
+              "options": {
+                "queued": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "Queued"
+                },
+                "ignored": {
+                  "color": "yellow",
+                  "index": 1,
+                  "text": "Ignored"
+                },
+                "already_queued": {
+                  "color": "semi-dark-blue",
+                  "index": 2,
+                  "text": "Deduped"
+                },
+                "error": {
+                  "color": "red",
+                  "index": 3,
+                  "text": "Error"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 22,
+        "y": 0
+      },
+      "id": 24,
+      "options": {
+        "displayLabels": [],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "values": []
+      },
+      "pluginVersion": "10.4.2",
+      "targets": [
+        {
+          "expr": "code_review_webhooks_total",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Webhook Status",
+      "type": "piechart"
     },
     {
       "fieldConfig": {

@@ -18,7 +18,6 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 2,
   "links": [],
   "panels": [
     {
@@ -268,7 +267,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 3,
         "x": 12,
         "y": 0
       },
@@ -323,8 +322,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 16,
+        "w": 3,
+        "x": 15,
         "y": 0
       },
       "id": 19,
@@ -407,8 +406,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 2,
-        "x": 20,
+        "w": 3,
+        "x": 18,
         "y": 0
       },
       "id": 20,
@@ -459,16 +458,6 @@
           "mappings": [
             {
               "options": {
-                "queued": {
-                  "color": "green",
-                  "index": 0,
-                  "text": "Queued"
-                },
-                "ignored": {
-                  "color": "yellow",
-                  "index": 1,
-                  "text": "Ignored"
-                },
                 "already_queued": {
                   "color": "semi-dark-blue",
                   "index": 2,
@@ -478,27 +467,28 @@
                   "color": "red",
                   "index": 3,
                   "text": "Error"
+                },
+                "ignored": {
+                  "color": "yellow",
+                  "index": 1,
+                  "text": "Ignored"
+                },
+                "queued": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "Queued"
                 }
               },
               "type": "value"
             }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
+          ]
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 2,
-        "x": 22,
+        "w": 3,
+        "x": 21,
         "y": 0
       },
       "id": 24,
@@ -589,12 +579,34 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "success" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "failure" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "failure"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
@@ -950,7 +962,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 7,
+        "w": 6,
         "x": 12,
         "y": 12
       },
@@ -1036,19 +1048,41 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "success" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "failure" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "failure"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
       "gridPos": {
         "h": 8,
-        "w": 5,
-        "x": 19,
+        "w": 6,
+        "x": 18,
         "y": 12
       },
       "id": 9,
@@ -1463,6 +1497,6 @@
   "timezone": "",
   "title": "Code Review Bot",
   "uid": "code-review-bot",
-  "version": 7,
+  "version": 13,
   "weekStart": ""
 }

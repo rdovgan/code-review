@@ -1,0 +1,745 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "description": "Total pull requests analyzed across all projects",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "green", "mode": "fixed" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true,
+        "noValue": "0"
+      },
+      "targets": [
+        {
+          "expr": "sum(code_review_reviews_total{status!=\"skipped\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "PRs Reviewed",
+      "type": "stat"
+    },
+    {
+      "description": "Total code quality issues detected by Semgrep and AI analysis",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "orange", "mode": "fixed" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true,
+        "noValue": "0"
+      },
+      "targets": [
+        {
+          "expr": "sum(code_review_findings_total)",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Issues Detected",
+      "type": "stat"
+    },
+    {
+      "description": "Issues that could cause production failures, security vulnerabilities, or incorrect behavior",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "red", "mode": "fixed" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true,
+        "noValue": "0"
+      },
+      "targets": [
+        {
+          "expr": "sum(code_review_findings_total{severity=~\"critical|bug\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Critical & Bugs Caught",
+      "type": "stat"
+    },
+    {
+      "description": "Estimated developer time saved — 15 min base per PR reviewed, plus 3 min per finding beyond 5 in a single PR",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "blue", "mode": "fixed" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true,
+        "noValue": "0"
+      },
+      "targets": [
+        {
+          "expr": "round((sum(code_review_reviews_total{status!=\"skipped\"}) * 15 + sum(code_review_extra_findings_total) * 3) / 60, 1)",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Hours Saved (est.)",
+      "type": "stat"
+    },
+
+    {
+      "description": "Percentage of reviews that passed without blocking issues",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 6 },
+      "id": 5,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "targets": [
+        {
+          "expr": "round(sum(code_review_reviews_total{status=\"success\"}) / clamp_min(sum(code_review_reviews_total{status!=\"skipped\"}), 1) * 100, 1)",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Review Success Rate",
+      "type": "gauge"
+    },
+    {
+      "description": "Number of repositories with at least one review processed",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "purple", "mode": "fixed" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 6 },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true,
+        "noValue": "0"
+      },
+      "targets": [
+        {
+          "expr": "count(count by (project) (code_review_reviews_by_project_total))",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Projects Covered",
+      "type": "stat"
+    },
+    {
+      "description": "Distinct programming languages detected across reviewed PRs",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "purple", "mode": "fixed" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 6 },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true,
+        "noValue": "0"
+      },
+      "targets": [
+        {
+          "expr": "count(count by (language) (code_review_reviews_by_language_total{language!=\"unknown\"}))",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Languages Analyzed",
+      "type": "stat"
+    },
+    {
+      "description": "Average number of findings per reviewed PR",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "yellow", "mode": "fixed" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 6 },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true,
+        "noValue": "0"
+      },
+      "targets": [
+        {
+          "expr": "round(sum(code_review_findings_total) / clamp_min(sum(code_review_reviews_total{status!=\"skipped\"}), 1), 1)",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Findings per PR",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
+      "id": 100,
+      "title": "Activity & Findings",
+      "type": "row"
+    },
+
+    {
+      "description": "Daily review volume broken down by outcome",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "normal" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "success" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "failure" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 10, "x": 0, "y": 11 },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (increase(code_review_reviews_total{status!=\"skipped\"}[1d]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Reviews Over Time",
+      "type": "timeseries"
+    },
+    {
+      "description": "All-time distribution of findings by severity level",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "critical" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "bug" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "performance" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "suggestion" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 7, "x": 10, "y": 11 },
+      "id": 10,
+      "options": {
+        "displayLabels": [],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "tooltip": { "mode": "single", "sort": "none" },
+        "values": []
+      },
+      "targets": [
+        {
+          "expr": "code_review_findings_total",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Findings by Severity",
+      "type": "piechart"
+    },
+    {
+      "description": "Relative contribution of static analysis (Semgrep) vs AI review",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "semgrep" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "ai" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "super-light-green", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 7, "x": 17, "y": 11 },
+      "id": 11,
+      "options": {
+        "displayLabels": [],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "tooltip": { "mode": "single", "sort": "none" },
+        "values": []
+      },
+      "targets": [
+        {
+          "expr": "code_review_findings_by_source_total",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Semgrep vs AI",
+      "type": "piechart"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 },
+      "id": 101,
+      "title": "Trends",
+      "type": "row"
+    },
+
+    {
+      "description": "Daily new findings broken down by severity — shows if issue types are trending up or down",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "normal" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "critical" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "bug" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "performance" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "suggestion" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "increase(code_review_findings_total[1d])",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Findings by Severity Over Time",
+      "type": "timeseries"
+    },
+    {
+      "description": "Average review processing time — spikes may indicate Semgrep rule downloads or AI API latency",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "avg duration (s)" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": { "mode": "single", "sort": "none" },
+        "unit": "s"
+      },
+      "targets": [
+        {
+          "expr": "rate(code_review_duration_milliseconds_sum[30m]) / clamp_min(rate(code_review_duration_milliseconds_count[30m]), 0.001) / 1000",
+          "legendFormat": "avg duration (s)",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Review Duration",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "id": 102,
+      "title": "Project & Language Coverage",
+      "type": "row"
+    },
+
+    {
+      "description": "Per-project review volume and findings breakdown — sorted by most reviewed",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 80 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Critical" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "threshold" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "transparent", "value": null }, { "color": "light-red", "value": 1 }] } }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 29 },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Reviews" }]
+      },
+      "targets": [
+        { "expr": "sum by (project) (code_review_reviews_by_project_total{status!=\"skipped\"})", "format": "table", "instant": true, "legendFormat": "", "refId": "A" },
+        { "expr": "code_review_findings_by_project_total{severity=\"critical\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "B" },
+        { "expr": "code_review_findings_by_project_total{severity=\"bug\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "C" },
+        { "expr": "code_review_findings_by_project_total{severity=\"performance\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "D" },
+        { "expr": "code_review_findings_by_project_total{severity=\"suggestion\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "E" }
+      ],
+      "title": "Project Summary",
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "project" } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true, "Time 5": true,
+              "__name__": true, "instance": true, "job": true, "severity": true, "status": true
+            },
+            "renameByName": {
+              "Value #A": "Reviews",
+              "Value #B": "Critical",
+              "Value #C": "Bug",
+              "Value #D": "Performance",
+              "Value #E": "Suggestion",
+              "project": "Project"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "description": "Per-language review coverage and findings breakdown — shows which languages benefit most",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 80 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 29 },
+      "id": 15,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Reviews" }]
+      },
+      "targets": [
+        { "expr": "sum by (language) (code_review_reviews_by_language_total{status!=\"skipped\"})", "format": "table", "instant": true, "legendFormat": "", "refId": "A" },
+        { "expr": "code_review_findings_by_language_total{severity=\"critical\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "B" },
+        { "expr": "code_review_findings_by_language_total{severity=\"bug\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "C" },
+        { "expr": "code_review_findings_by_language_total{severity=\"performance\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "D" },
+        { "expr": "code_review_findings_by_language_total{severity=\"suggestion\"}", "format": "table", "instant": true, "legendFormat": "", "refId": "E" }
+      ],
+      "title": "Language Summary",
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "language" } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true, "Time 5": true,
+              "__name__": true, "instance": true, "job": true, "severity": true, "status": true
+            },
+            "renameByName": {
+              "Value #A": "Reviews",
+              "Value #B": "Critical",
+              "Value #C": "Bug",
+              "Value #D": "Performance",
+              "Value #E": "Suggestion",
+              "language": "Language"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": ["presentation", "impact"],
+  "templating": { "list": [] },
+  "time": { "from": "now-90d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Code Review Bot — Impact Report",
+  "uid": "code-review-bot-impact",
+  "version": 1,
+  "weekStart": ""
+}

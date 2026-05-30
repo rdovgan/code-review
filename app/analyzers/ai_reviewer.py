@@ -171,7 +171,7 @@ class AIReviewer:
             chunks = chunks[:self._MAX_CHUNKS]
         findings: list[Finding] = []
         consecutive_parse_failures = 0
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             # Pre-check budget before sending
             if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
                 used = int(self._redis.get(self._budget_key()) or 0)
@@ -191,6 +191,7 @@ class AIReviewer:
                 else:
                     text, input_tokens, output_tokens = self._call_claude(prompt, chunk)
                 self._check_and_record_tokens(input_tokens, output_tokens)
+                logger.debug("AI raw response (chunk %d/%d): %s", i + 1, len(chunks), text)
                 items = self._parse_response(text)
                 if not items:
                     consecutive_parse_failures += 1

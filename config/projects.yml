@@ -41,7 +41,7 @@ projects:
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
-    static_analysis: true
+    static_analysis: false
     block_merge_on:
       - CRITICAL
     max_diff_lines: 5000

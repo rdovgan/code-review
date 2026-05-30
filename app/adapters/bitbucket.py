@@ -3,7 +3,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import BOT_MARKER, GitPlatform, hmac_verify
+from app.adapters.base import GitPlatform, hmac_verify
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,7 @@ BITBUCKET_API = "https://api.bitbucket.org"
 class BitbucketAdapter(GitPlatform):
     def __init__(self, webhook_secret: str, username: str = "", app_password: str = "", api_token: str = "") -> None:
         self._secret = webhook_secret
+        self._bot_uuid: str | None = None
         if api_token:
             self._client = httpx.Client(
                 headers={"Authorization": f"Bearer {api_token}"},
@@ -117,7 +118,7 @@ class BitbucketAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        body = f"{BOT_MARKER}\n**[{finding.severity.value}]** {finding.message}"
+        body = f"**[{finding.severity.value}]** {finding.message}"
         if finding.suggestion:
             body += f"\n\n💡 {finding.suggestion}"
         payload = {
@@ -131,7 +132,7 @@ class BitbucketAdapter(GitPlatform):
     def post_summary_comment(self, pr_context: PRContext, body: str) -> str:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        payload = {"content": {"raw": f"{BOT_MARKER}\n{body}"}}
+        payload = {"content": {"raw": body}}
         resp = self._client.post(url, json=payload)
         resp.raise_for_status()
         return str(resp.json().get("id", ""))
@@ -142,15 +143,24 @@ class BitbucketAdapter(GitPlatform):
         resp = self._client.delete(url)
         return resp.status_code in (200, 204)
 
+    def _resolve_bot_identity(self) -> str:
+        """Lazy-fetch the bot's Bitbucket UUID (cached after first call)."""
+        if self._bot_uuid is None:
+            resp = self._client.get(f"{BITBUCKET_API}/2.0/user")
+            resp.raise_for_status()
+            self._bot_uuid = resp.json()["uuid"]
+        return self._bot_uuid
+
     def get_existing_bot_comments(self, pr_context: PRContext) -> list[dict]:
+        bot_uuid = self._resolve_bot_identity()
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
         resp = self._client.get(url)
         resp.raise_for_status()
         comments = []
         for c in resp.json().get("values", []):
-            raw = c.get("content", {}).get("raw", "")
-            if BOT_MARKER in raw:
+            if c.get("user", {}).get("uuid") == bot_uuid:
+                raw = c.get("content", {}).get("raw", "")
                 comments.append({"id": str(c.get("id", "")), "body": raw})
         return comments
 

@@ -4,7 +4,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import BOT_MARKER, GitPlatform, hmac_verify
+from app.adapters.base import GitPlatform, hmac_verify
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ GITHUB_API = "https://api.github.com"
 class GithubAdapter(GitPlatform):
     def __init__(self, webhook_secret: str, token: str) -> None:
         self._secret = webhook_secret
+        self._bot_username: str | None = None
         self._client = httpx.Client(
             headers={
                 "Authorization": f"Bearer {token}",
@@ -100,7 +101,7 @@ class GithubAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         owner, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_context.pr_id}/comments"
-        body = f"{BOT_MARKER}\n**[{finding.severity.value}]** {finding.message}"
+        body = f"**[{finding.severity.value}]** {finding.message}"
         if finding.suggestion:
             body += f"\n\n💡 {finding.suggestion}"
         payload = {
@@ -117,7 +118,7 @@ class GithubAdapter(GitPlatform):
     def post_summary_comment(self, pr_context: PRContext, body: str) -> str:
         owner, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{GITHUB_API}/repos/{owner}/{repo}/issues/{pr_context.pr_id}/comments"
-        resp = self._client.post(url, json={"body": f"{BOT_MARKER}\n{body}"})
+        resp = self._client.post(url, json={"body": body})
         resp.raise_for_status()
         return str(resp.json().get("id", ""))
 
@@ -134,23 +135,30 @@ class GithubAdapter(GitPlatform):
         resp = self._client.delete(url)
         return resp.status_code in (200, 204)
 
+    def _resolve_bot_identity(self) -> str:
+        """Lazy-fetch the bot's GitHub login (cached after first call)."""
+        if self._bot_username is None:
+            resp = self._client.get(f"{GITHUB_API}/user")
+            resp.raise_for_status()
+            self._bot_username = resp.json()["login"]
+        return self._bot_username
+
     def get_existing_bot_comments(self, pr_context: PRContext) -> list[dict]:
+        bot_login = self._resolve_bot_identity()
         owner, repo = pr_context.repo_full_name.split("/", 1)
         comments = []
         url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_context.pr_id}/comments"
         resp = self._client.get(url)
         resp.raise_for_status()
         for c in resp.json():
-            body = c.get("body", "")
-            if BOT_MARKER in body:
-                comments.append({"id": f"review:{c.get('id')}", "body": body})
+            if c.get("user", {}).get("login") == bot_login:
+                comments.append({"id": f"review:{c.get('id')}", "body": c.get("body", "")})
         url = f"{GITHUB_API}/repos/{owner}/{repo}/issues/{pr_context.pr_id}/comments"
         resp = self._client.get(url)
         resp.raise_for_status()
         for c in resp.json():
-            body = c.get("body", "")
-            if BOT_MARKER in body:
-                comments.append({"id": f"issue:{c.get('id')}", "body": body})
+            if c.get("user", {}).get("login") == bot_login:
+                comments.append({"id": f"issue:{c.get('id')}", "body": c.get("body", "")})
         return comments
 
     def set_review_status(self, pr_context: PRContext, state: str, description: str) -> bool:

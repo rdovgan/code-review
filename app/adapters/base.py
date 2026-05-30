@@ -5,8 +5,6 @@ from typing import Optional
 
 from app.models import Finding, PRContext
 
-BOT_MARKER = "<!-- code-review-bot -->"
-
 
 def hmac_verify(secret: str, body: bytes, signature: str, algorithm: str = "sha256") -> bool:
     mac = hmac.new(secret.encode(), body, algorithm)

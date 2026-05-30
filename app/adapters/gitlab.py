@@ -4,7 +4,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import BOT_MARKER, GitPlatform
+from app.adapters.base import GitPlatform
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ GITLAB_API = "https://gitlab.com/api/v4"
 class GitlabAdapter(GitPlatform):
     def __init__(self, webhook_secret: str, token: str, base_url: str = "") -> None:
         self._secret = webhook_secret
+        self._bot_username: str | None = None
         self._base_url = base_url.rstrip("/") if base_url else GITLAB_API
         self._client = httpx.Client(
             headers={"PRIVATE-TOKEN": token},
@@ -92,7 +93,7 @@ class GitlabAdapter(GitPlatform):
     def post_inline_comment(self, pr_context: PRContext, finding: Finding) -> str:
         project = self._encode_project(pr_context.repo_full_name)
         url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/discussions"
-        body = f"{BOT_MARKER}\n**[{finding.severity.value}]** {finding.message}"
+        body = f"**[{finding.severity.value}]** {finding.message}"
         if finding.suggestion:
             body += f"\n\n💡 {finding.suggestion}"
         payload = {
@@ -113,7 +114,7 @@ class GitlabAdapter(GitPlatform):
     def post_summary_comment(self, pr_context: PRContext, body: str) -> str:
         project = self._encode_project(pr_context.repo_full_name)
         url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/notes"
-        resp = self._client.post(url, json={"body": f"{BOT_MARKER}\n{body}"})
+        resp = self._client.post(url, json={"body": body})
         resp.raise_for_status()
         return str(resp.json().get("id", ""))
 
@@ -130,24 +131,31 @@ class GitlabAdapter(GitPlatform):
         resp = self._client.delete(url)
         return resp.status_code in (200, 204)
 
+    def _resolve_bot_identity(self) -> str:
+        """Lazy-fetch the bot's GitLab username (cached after first call)."""
+        if self._bot_username is None:
+            resp = self._client.get(f"{self._base_url}/user")
+            resp.raise_for_status()
+            self._bot_username = resp.json()["username"]
+        return self._bot_username
+
     def get_existing_bot_comments(self, pr_context: PRContext) -> list[dict]:
+        bot_username = self._resolve_bot_identity()
         project = self._encode_project(pr_context.repo_full_name)
         comments = []
         url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/notes"
         resp = self._client.get(url)
         resp.raise_for_status()
         for c in resp.json():
-            body = c.get("body", "")
-            if BOT_MARKER in body:
-                comments.append({"id": f"note:{c.get('id')}", "body": body})
+            if c.get("author", {}).get("username") == bot_username:
+                comments.append({"id": f"note:{c.get('id')}", "body": c.get("body", "")})
         url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/discussions"
         resp = self._client.get(url)
         if resp.status_code == 200:
             for d in resp.json():
                 for note in d.get("notes", []):
-                    body = note.get("body", "")
-                    if BOT_MARKER in body:
-                        comments.append({"id": f"discussion:{d.get('id')}", "body": body})
+                    if note.get("author", {}).get("username") == bot_username:
+                        comments.append({"id": f"discussion:{d.get('id')}", "body": note.get("body", "")})
         return comments
 
     def set_review_status(self, pr_context: PRContext, state: str, description: str) -> bool:

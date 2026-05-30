@@ -143,16 +143,32 @@ class BitbucketAdapter(GitPlatform):
         resp = self._client.delete(url)
         return resp.status_code in (200, 204)
 
-    def _resolve_bot_identity(self) -> str:
-        """Lazy-fetch the bot's Bitbucket UUID (cached after first call)."""
+    def _resolve_bot_identity(self) -> str | None:
+        """Lazy-fetch the bot's Bitbucket UUID (cached after first call).
+
+        Returns None if the endpoint fails (e.g. token lacks account scope).
+        """
         if self._bot_uuid is None:
-            resp = self._client.get(f"{BITBUCKET_API}/2.0/user")
-            resp.raise_for_status()
-            self._bot_uuid = resp.json()["uuid"]
-        return self._bot_uuid
+            try:
+                resp = self._client.get(f"{BITBUCKET_API}/2.0/user")
+                resp.raise_for_status()
+                self._bot_uuid = resp.json()["uuid"]
+            except Exception as exc:
+                logger.warning("Failed to resolve bot identity via /2.0/user: %s", exc)
+                self._bot_uuid = False  # sentinel: tried and failed
+        return self._bot_uuid or None
+
+    def _bot_identity_available(self) -> bool:
+        """True if we were able to resolve the bot's UUID."""
+        if self._bot_uuid is None:
+            self._resolve_bot_identity()
+        return bool(self._bot_uuid)
 
     def get_existing_bot_comments(self, pr_context: PRContext) -> list[dict]:
         bot_uuid = self._resolve_bot_identity()
+        if bot_uuid is None:
+            logger.warning("Cannot fetch bot comments: bot UUID unavailable (check token scopes)")
+            return []
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
         resp = self._client.get(url)

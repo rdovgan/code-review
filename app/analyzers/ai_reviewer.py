@@ -84,6 +84,9 @@ class AIReviewer:
 
     def _parse_response(self, text: str) -> list[dict]:
         text = text.strip()
+        if not text:
+            logger.warning("AI returned empty response")
+            return []
         if text.startswith("```"):
             lines = text.splitlines()
             # Remove opening fence (```json or ```)
@@ -92,10 +95,18 @@ class AIReviewer:
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             text = "\n".join(lines)
+        # Try to extract JSON array from mixed text (e.g. "Here is the result:\n[...")
+        if text.startswith("[") is False:
+            start = text.find("[")
+            if start != -1:
+                end = text.rfind("]")
+                if end > start:
+                    text = text[start : end + 1]
+                    logger.info("Extracted JSON array from mixed AI response")
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse AI response as JSON: %s", text[:200])
+            logger.warning("Failed to parse AI response as JSON (first 500 chars): %s", text[:500])
             return []
 
     def _validate_finding(self, item: dict) -> Optional[Finding]:
@@ -135,6 +146,13 @@ class AIReviewer:
             ],
         )
         text = response.choices[0].message.content
+        if not text:
+            finish_reason = response.choices[0].finish_reason
+            logger.warning(
+                "GLM returned empty content (finish_reason=%s, model=%s)",
+                finish_reason, self._settings.GLM_MODEL,
+            )
+            text = ""
         return text, response.usage.prompt_tokens, response.usage.completion_tokens
 
     # Circuit breaker: stop AI review after N consecutive parse failures

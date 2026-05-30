@@ -155,9 +155,12 @@ def process_review(self, task_payload: dict) -> dict:
 
     findings = filter_by_config(merge_findings(semgrep_results, ai_results), config)
 
-    # Clean up old bot comments
-    for comment in adapter.get_existing_bot_comments(pr_context):
-        adapter.delete_comment(pr_context, comment["id"])
+    # Clean up old bot comments (best-effort — don't crash if permissions are missing)
+    try:
+        for comment in adapter.get_existing_bot_comments(pr_context):
+            adapter.delete_comment(pr_context, comment["id"])
+    except Exception as exc:
+        logger.warning("%s Failed to clean up old bot comments: %s", pr_tag, exc)
 
     # Post inline comments — SUGGEST is summary-only (line attribution is often imprecise)
     inline_count = 0

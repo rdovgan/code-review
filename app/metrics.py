@@ -29,6 +29,7 @@ class Metrics:
     _FINDINGS_BY_LANG_KEY = "metrics:findings_by_lang"
     _FINDINGS_BY_PROJECT_KEY = "metrics:findings_by_project"
     _FINDINGS_BY_AUTHOR_KEY = "metrics:findings_by_author"
+    _EXTRA_FINDINGS_KEY = "metrics:extra_findings"
 
     def __init__(self, redis_url: str) -> None:
         self._r = redis.from_url(redis_url, decode_responses=True)
@@ -91,6 +92,9 @@ class Metrics:
             pipe.hincrby(self._FINDINGS_BY_AUTHOR_KEY, f"{author}:bug", bugs)
             pipe.hincrby(self._FINDINGS_BY_AUTHOR_KEY, f"{author}:total", total_findings)
 
+            # extra findings beyond 5 per PR (for time-saved calculation)
+            pipe.incrby(self._EXTRA_FINDINGS_KEY, max(0, total_findings - 5))
+
             pipe.execute()
         except Exception:
             pass
@@ -111,6 +115,7 @@ class Metrics:
             findings_by_lang = self._r.hgetall(self._FINDINGS_BY_LANG_KEY)
             findings_by_project = self._r.hgetall(self._FINDINGS_BY_PROJECT_KEY)
             findings_by_author = self._r.hgetall(self._FINDINGS_BY_AUTHOR_KEY)
+            extra_findings = int(self._r.get(self._EXTRA_FINDINGS_KEY) or 0)
         except Exception:
             return "# Redis unavailable\n"
 
@@ -190,6 +195,13 @@ class Metrics:
         for field, val in findings_by_project.items():
             project, severity = field.rsplit(":", 1)
             lines.append(f'code_review_findings_by_project_total{{project="{project}",severity="{severity}"}} {val}')
+
+        # --- extra findings (beyond 5 per PR) ---
+        lines += [
+            "# HELP code_review_extra_findings_total Cumulative findings beyond the first 5 per reviewed PR",
+            "# TYPE code_review_extra_findings_total counter",
+            f"code_review_extra_findings_total {extra_findings}",
+        ]
 
         # --- by author ---
         lines += [

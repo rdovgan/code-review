@@ -7,7 +7,7 @@ import pytest
 from app.analyzers.ai_reviewer import AIReviewer
 from app.analyzers.semgrep_runner import SemgrepRunner
 from app.config.settings import Settings
-from app.models import PRContext, ReviewConfig, Severity
+from app.models import Finding, PRContext, ReviewConfig, Severity
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -86,6 +86,64 @@ def test_ai_reviewer_strips_markdown_fences():
     assert len(findings) == 1
     assert findings[0].severity == Severity.BUG
     assert findings[0].file == "Bar.java"
+
+
+def _make_semgrep_finding(file: str = "Foo.java", line: int = 1, message: str = "Possible issue") -> Finding:
+    return Finding(
+        severity=Severity.BUG,
+        file=file,
+        line=line,
+        message=message,
+        suggestion="Fix it",
+        source="semgrep",
+        rule_id="java.lang.security.some-rule",
+    )
+
+
+def test_verify_semgrep_findings_empty_list_skips_ai_call():
+    settings = _make_settings()
+    reviewer = _make_reviewer(settings)
+    with patch.object(reviewer._client.messages, "create") as mock_create:
+        result = reviewer.verify_semgrep_findings([], _make_pr_context())
+    mock_create.assert_not_called()
+    assert result == []
+
+
+def test_verify_semgrep_findings_filters_false_positives():
+    settings = _make_settings()
+    reviewer = _make_reviewer(settings)
+    findings = [_make_semgrep_finding(line=1, message="Real bug"), _make_semgrep_finding(line=2, message="Noise")]
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(text=json.dumps([
+        {"index": 0, "verdict": "CONFIRMED", "reason": "genuinely unsafe"},
+        {"index": 1, "verdict": "FALSE_POSITIVE", "reason": "input already sanitized above"},
+    ]))]
+    mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
+    with patch.object(reviewer._client.messages, "create", return_value=mock_response):
+        result = reviewer.verify_semgrep_findings(findings, _make_pr_context())
+    assert len(result) == 1
+    assert result[0].message == "Real bug"
+
+
+def test_verify_semgrep_findings_fails_open_on_ai_error():
+    settings = _make_settings()
+    reviewer = _make_reviewer(settings)
+    findings = [_make_semgrep_finding()]
+    with patch.object(reviewer._client.messages, "create", side_effect=RuntimeError("boom")):
+        result = reviewer.verify_semgrep_findings(findings, _make_pr_context())
+    assert result == findings
+
+
+def test_verify_semgrep_findings_fails_open_on_unparseable_response():
+    settings = _make_settings()
+    reviewer = _make_reviewer(settings)
+    findings = [_make_semgrep_finding()]
+    mock_response = MagicMock()
+    mock_response.content = [MagicMock(text="not json")]
+    mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
+    with patch.object(reviewer._client.messages, "create", return_value=mock_response):
+        result = reviewer.verify_semgrep_findings(findings, _make_pr_context())
+    assert result == findings
 
 
 def test_semgrep_runner_filters_ignore_paths():

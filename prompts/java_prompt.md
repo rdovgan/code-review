@@ -8,6 +8,7 @@ Analyze the following git diff and classify each issue as:
 
 Rules:
 - Only report issues VISIBLE in the diff. Do not speculate about code outside the diff.
+- Prioritize substance over volume: report CRITICAL/BUG/PERFORMANCE issues freely, but only report SUGGEST-level issues when they meaningfully affect correctness risk, readability, or maintainability — skip purely stylistic nitpicks that don't change how the code behaves or reads. Prefer fewer, higher-value findings over an exhaustive nitpick list.
 - message: one sentence, max 15 words, describe the specific problem (e.g. "User input passed directly to SQL query")
 - suggestion: one sentence, max 15 words, concrete fix (e.g. "Use PreparedStatement with parameterized query")
 - Return ONLY a valid JSON array. No markdown fences, no explanation, no preamble.

@@ -219,6 +219,7 @@ If nothing appears after 30 seconds: `docker compose logs --tail=50 worker`
 | `language` | string | `auto` | `java`, `dotnet`, `php`, `js`, `python`, or `auto` (detects from file extensions) |
 | `ai_review` | bool | `true` | Run the Claude AI analyzer |
 | `static_analysis` | bool | `true` | Run Semgrep |
+| `semgrep_ai_verify` | bool | `true` | Re-check each Semgrep finding with AI and drop ones judged to be false positives before posting (fails open — keeps findings unfiltered if verification errors out) |
 | `block_merge_on` | list | `[CRITICAL]` | Severity levels that set build status to FAILED |
 | `max_diff_lines` | int | `500` | Skip review if diff exceeds this line count |
 | `ignore_paths` | list | `[]` | Glob patterns — matching files produce no findings |

@@ -24,6 +24,8 @@ Analyze the following git diff and classify each issue as:
 
 Rules:
 - Only report issues VISIBLE in the diff.
+- Prioritize substance over volume: report CRITICAL/BUG/PERFORMANCE issues freely, but only report SUGGEST-level issues when they meaningfully affect correctness risk, readability, or maintainability — skip purely stylistic nitpicks that don't change how the code behaves or reads.
+- Prefer fewer, higher-value findings. If a change has no real issues, return [] rather than inventing minor nits to fill the response.
 - Return ONLY a valid JSON array. No markdown fences, no explanation.
 - If no issues found, return: []
 
@@ -67,10 +69,10 @@ class AIReviewer:
             return prompt_file.read_text()
         return _GENERIC_PROMPT
 
-    def _split_if_needed(self, diff: str) -> list[str]:
-        approx_tokens = len(diff) // 4
-        if approx_tokens <= self._settings.AI_MAX_DIFF_TOKENS:
-            return [diff]
+    def _load_verify_prompt(self) -> str:
+        return (_PROMPTS_DIR / "verify_semgrep.md").read_text()
+
+    def _split_by_file(self, diff: str) -> list[str]:
         chunks = []
         current = []
         for line in diff.splitlines(keepends=True):
@@ -81,6 +83,12 @@ class AIReviewer:
         if current:
             chunks.append("".join(current))
         return chunks if chunks else [diff]
+
+    def _split_if_needed(self, diff: str) -> list[str]:
+        approx_tokens = len(diff) // 4
+        if approx_tokens <= self._settings.AI_MAX_DIFF_TOKENS:
+            return [diff]
+        return self._split_by_file(diff)
 
     def _parse_response(self, text: str) -> list[dict]:
         text = text.strip()
@@ -205,3 +213,58 @@ class AIReviewer:
                 logger.error("AI review chunk failed: %s", exc)
                 consecutive_parse_failures += 1
         return findings
+
+    def verify_semgrep_findings(self, findings: list[Finding], pr_context: PRContext) -> list[Finding]:
+        """Re-check Semgrep findings with AI and drop ones it judges to be false positives.
+
+        Fails open (returns findings unfiltered) on budget exhaustion, AI errors, or an
+        unparseable response — a verification hiccup should never silently suppress a real
+        static-analysis finding.
+        """
+        if not findings:
+            return findings
+
+        if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
+            used = int(self._redis.get(self._budget_key()) or 0)
+            if used >= self._settings.AI_DAILY_TOKEN_BUDGET:
+                logger.warning("Daily AI token budget reached, skipping semgrep verification (failing open)")
+                return findings
+
+        files = {f.file for f in findings}
+        relevant_diff = "".join(
+            chunk for chunk in self._split_by_file(pr_context.diff)
+            if any(f in chunk for f in files)
+        ) or pr_context.diff
+
+        payload = [
+            {"index": i, "rule_id": f.rule_id or "", "file": f.file, "line": f.line, "message": f.message}
+            for i, f in enumerate(findings)
+        ]
+        chunk = f"{relevant_diff}\n\n---\nSTATIC_ANALYSIS_FINDINGS_JSON:\n{json.dumps(payload)}"
+        prompt = self._load_verify_prompt()
+
+        try:
+            if self._provider == "glm":
+                text, input_tokens, output_tokens = self._call_glm(prompt, chunk)
+            else:
+                text, input_tokens, output_tokens = self._call_claude(prompt, chunk)
+            self._check_and_record_tokens(input_tokens, output_tokens)
+            items = self._parse_response(text)
+        except Exception as exc:
+            logger.error("Semgrep AI verification call failed, keeping findings unverified: %s", exc)
+            return findings
+
+        if not items:
+            logger.warning("Semgrep AI verification returned no parseable verdicts, keeping findings unverified")
+            return findings
+
+        confirmed_indexes: set[int] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            verdict = str(item.get("verdict", "")).upper()
+            if isinstance(idx, int) and verdict == "CONFIRMED":
+                confirmed_indexes.add(idx)
+
+        return [f for i, f in enumerate(findings) if i in confirmed_indexes]

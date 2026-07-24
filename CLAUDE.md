@@ -114,6 +114,7 @@ docker compose up --build
 | `BOT_MARKER` in every comment | Platform-agnostic way to find own comments for cleanup on re-review |
 | Central `config/projects.yml` | Onboard projects without touching their codebase; `.codereview.yml` in repo can override |
 | Graceful analyzer failures | If Semgrep or AI fails, task continues with the other's results |
+| Semgrep findings AI-verified before posting (`semgrep_ai_verify`) | Cuts static-analysis false positives; fails open (keeps findings unfiltered) if verification errors out — a verification hiccup must never hide a real finding |
 
 ## Roadmap
 

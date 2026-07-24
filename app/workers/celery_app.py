@@ -114,6 +114,7 @@ def process_review(self, task_payload: dict) -> dict:
 
     semgrep_results = []
     ai_results = []
+    ai_reviewer = None
 
     try:
         if config.static_analysis:
@@ -124,10 +125,24 @@ def process_review(self, task_payload: dict) -> dict:
             except Exception as exc:
                 logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
 
+            if semgrep_results and config.semgrep_ai_verify:
+                logger.info("%s Step 1/2: Verifying %d semgrep finding(s) via AI", pr_tag, len(semgrep_results))
+                try:
+                    ai_reviewer = ai_reviewer or AIReviewer(settings)
+                    verified = ai_reviewer.verify_semgrep_findings(semgrep_results, pr_context)
+                    logger.info(
+                        "%s Step 1/2: Semgrep AI verification kept %d/%d finding(s)",
+                        pr_tag, len(verified), len(semgrep_results),
+                    )
+                    semgrep_results = verified
+                except Exception as exc:
+                    logger.error("%s Step 1/2: Semgrep AI verification failed, keeping unverified results — %s", pr_tag, exc)
+
         if config.ai_review:
             logger.info("%s Step 2/2: AI review started", pr_tag)
             try:
-                ai_results = AIReviewer(settings).review(pr_context, config)
+                ai_reviewer = ai_reviewer or AIReviewer(settings)
+                ai_results = ai_reviewer.review(pr_context, config)
                 logger.info("%s Step 2/2: AI review complete — %d finding(s)", pr_tag, len(ai_results))
             except Exception as exc:
                 logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)

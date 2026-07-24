@@ -71,6 +71,79 @@ def test_process_review_posts_comments(mock_config, mock_semgrep_cls, mock_ai_cl
 @patch("app.workers.celery_app.AIReviewer")
 @patch("app.workers.celery_app.SemgrepRunner")
 @patch("app.workers.celery_app.load_project_config")
+def test_process_review_verifies_semgrep_findings_with_ai(mock_config, mock_semgrep_cls, mock_ai_cls, mock_get_adapter):
+    mock_adapter = MagicMock()
+    mock_adapter.get_diff.return_value = "\n".join(f"line {i}" for i in range(10))
+    mock_adapter.get_changed_files.return_value = ["Foo.java"]
+    mock_adapter.get_existing_bot_comments.return_value = []
+    mock_get_adapter.return_value = mock_adapter
+
+    config = ReviewConfig(semgrep_ai_verify=True)
+    mock_config.return_value = config
+
+    raw_finding = Finding(
+        severity=Severity.BUG, file="Foo.java", line=1,
+        message="raw semgrep hit", suggestion="fix", source="semgrep",
+    )
+    confirmed_finding = Finding(
+        severity=Severity.BUG, file="Foo.java", line=1,
+        message="confirmed real bug", suggestion="fix", source="semgrep",
+    )
+    mock_semgrep_cls.return_value.run.return_value = [raw_finding]
+    mock_ai_cls.return_value.verify_semgrep_findings.return_value = [confirmed_finding]
+    mock_ai_cls.return_value.review.return_value = []
+
+    from app.workers.celery_app import process_review
+
+    ctx = _make_pr_context()
+    payload = {"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx)}
+    payload["platform"] = "bitbucket"
+
+    result = process_review.run(payload)
+
+    mock_ai_cls.return_value.verify_semgrep_findings.assert_called_once()
+    called_findings = mock_ai_cls.return_value.verify_semgrep_findings.call_args[0][0]
+    assert called_findings == [raw_finding]
+    assert result["findings"] == 1
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_process_review_semgrep_verification_disabled_skips_ai_call(mock_config, mock_semgrep_cls, mock_ai_cls, mock_get_adapter):
+    mock_adapter = MagicMock()
+    mock_adapter.get_diff.return_value = "\n".join(f"line {i}" for i in range(10))
+    mock_adapter.get_changed_files.return_value = ["Foo.java"]
+    mock_adapter.get_existing_bot_comments.return_value = []
+    mock_get_adapter.return_value = mock_adapter
+
+    config = ReviewConfig(semgrep_ai_verify=False, ai_review=False)
+    mock_config.return_value = config
+
+    raw_finding = Finding(
+        severity=Severity.BUG, file="Foo.java", line=1,
+        message="raw semgrep hit", suggestion="fix", source="semgrep",
+    )
+    mock_semgrep_cls.return_value.run.return_value = [raw_finding]
+
+    from app.workers.celery_app import process_review
+
+    ctx = _make_pr_context()
+    payload = {"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx)}
+    payload["platform"] = "bitbucket"
+
+    result = process_review.run(payload)
+
+    mock_ai_cls.return_value.verify_semgrep_findings.assert_not_called()
+    mock_ai_cls.assert_not_called()
+    assert result["findings"] == 1
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
 def test_process_review_failure_status_on_critical(mock_config, mock_semgrep_cls, mock_ai_cls, mock_get_adapter):
     mock_adapter = MagicMock()
     mock_adapter.get_diff.return_value = "\n".join(f"line {i}" for i in range(10))

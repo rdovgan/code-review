@@ -54,6 +54,7 @@ class ReviewConfig:
     language: str = "auto"
     ai_review: bool = True
     static_analysis: bool = True
+    semgrep_ai_verify: bool = True
     block_merge_on: list[str] = field(default_factory=lambda: ["CRITICAL"])
     max_diff_lines: int = 500
     slack_channel: str = ""

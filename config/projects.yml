@@ -16,27 +16,6 @@ projects:
 
 # ── Java applications ──────────────────────────────────────────────────
 
-  rdovgan/pathminer:
-    language: java
-    ai_review: true
-    static_analysis: true
-    block_merge_on:
-      - CRITICAL
-    max_diff_lines: 2500
-    ignore_paths:
-      - "data/*"
-      - "**/*.png"
-    semgrep_rules:
-      - owasp
-      - security-audit
-      - p/java
-      - p/findsecbugs
-      - p/sql-injection
-      - p/secrets
-    ai_focus:
-      - security
-      - bugs
-
   mybookingpal/mbp:
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java

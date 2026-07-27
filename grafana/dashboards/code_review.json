@@ -1329,6 +1329,13 @@
           "instant": true,
           "legendFormat": "",
           "refId": "D"
+        },
+        {
+          "expr": "sum by (project) (code_review_reviews_by_project_total)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "E"
         }
       ],
       "title": "Findings by Project",
@@ -1348,6 +1355,7 @@
               "Time 2": true,
               "Time 3": true,
               "Time 4": true,
+              "Time 5": true,
               "__name__": true,
               "instance": true,
               "job": true,
@@ -1358,6 +1366,7 @@
               "Value #B": "Bug",
               "Value #C": "Performance",
               "Value #D": "Suggestion",
+              "Value #E": "Total PRs",
               "project": "Project"
             }
           }
@@ -1446,6 +1455,13 @@
           "instant": true,
           "legendFormat": "",
           "refId": "D"
+        },
+        {
+          "expr": "sum by (author) (code_review_reviews_by_author_total)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "E"
         }
       ],
       "title": "Findings by Author",
@@ -1465,6 +1481,7 @@
               "Time 2": true,
               "Time 3": true,
               "Time 4": true,
+              "Time 5": true,
               "__name__": true,
               "instance": true,
               "job": true,
@@ -1475,6 +1492,7 @@
               "Value #B": "Bug",
               "Value #C": "Performance",
               "Value #D": "Suggestion",
+              "Value #E": "Total PRs",
               "author": "Author"
             }
           }
@@ -1497,6 +1515,6 @@
   "timezone": "",
   "title": "Code Review Bot",
   "uid": "code-review-bot",
-  "version": 13,
+  "version": 14,
   "weekStart": ""
 }

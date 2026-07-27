@@ -4,7 +4,7 @@ from dataclasses import asdict
 
 from celery import Celery
 from celery.exceptions import SoftTimeLimitExceeded
-from celery.signals import task_failure, task_revoked
+from celery.signals import task_failure, task_retry, task_revoked
 
 from app.adapters.factory import get_adapter
 from app.analyzers.ai_reviewer import AIReviewer
@@ -18,7 +18,7 @@ from app.models import PRContext, Severity
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-metrics = Metrics(settings.REDIS_URL)
+metrics = Metrics(settings.REDIS_URL, ai_daily_token_budget=settings.AI_DAILY_TOKEN_BUDGET)
 
 
 @task_failure.connect(sender="app.workers.celery_app.process_review")
@@ -32,6 +32,12 @@ def on_task_revoked(sender, request, terminated, signum, expired, **kwargs):
     reason = "timeout" if expired or signum else "revoked"
     logger.error("Task %s %s (signal=%s)", request.id, reason, signum)
     metrics.inc_webhook(status="error")
+
+
+@task_retry.connect(sender="app.workers.celery_app.process_review")
+def on_task_retry(sender, request, reason, einfo, **kwargs):
+    logger.warning("Task %s retrying: %s", request.id, reason)
+    metrics.inc_task_retry()
 
 # Base time limits — dynamically scaled per task in process_review()
 _BASE_SOFT_TIME_LIMIT = 240   # 4 min base
@@ -134,6 +140,7 @@ def process_review(self, task_payload: dict) -> dict:
                         "%s Step 1/2: Semgrep AI verification kept %d/%d finding(s)",
                         pr_tag, len(verified), len(semgrep_results),
                     )
+                    metrics.record_semgrep_verification(kept=len(verified), total=len(semgrep_results))
                     semgrep_results = verified
                 except Exception as exc:
                     logger.error("%s Step 1/2: Semgrep AI verification failed, keeping unverified results — %s", pr_tag, exc)

@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 
 from app.adapters.base import GitPlatform
-from app.config.settings import Settings
+from app.config.settings import Settings, get_settings
+from app.metrics import Metrics
 from app.models import Finding, PRContext, ReviewConfig, Severity
 from app.utils.diff_parser import parse_diff_for_changed_lines
 
@@ -38,6 +39,7 @@ SEVERITY_MAP = {
 class SemgrepRunner:
     def __init__(self, config: ReviewConfig) -> None:
         self._config = config
+        self._metrics = Metrics(get_settings().REDIS_URL)
 
     def run(self, pr_context: PRContext, adapter: GitPlatform) -> list[Finding]:
         changed_lines_map = parse_diff_for_changed_lines(pr_context.diff)
@@ -77,10 +79,12 @@ class SemgrepRunner:
                 )
             except subprocess.TimeoutExpired:
                 logger.error("Semgrep timed out after 120s")
+                self._metrics.inc_semgrep_error("timeout")
                 return []
 
             if result.returncode not in (0, 1):
                 logger.error("Semgrep exited with unexpected code %d: %s", result.returncode, result.stderr[:200])
+                self._metrics.inc_semgrep_error("bad_exit")
                 return []
 
             try:
@@ -90,6 +94,7 @@ class SemgrepRunner:
                     "Semgrep returned invalid JSON (exit code %d)\nSTDERR: %s\nSTDOUT: %s",
                     result.returncode, result.stderr[:500], result.stdout[:200],
                 )
+                self._metrics.inc_semgrep_error("invalid_json")
                 return []
 
             findings: list[Finding] = []

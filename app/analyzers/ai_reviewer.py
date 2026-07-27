@@ -8,6 +8,7 @@ import anthropic
 import redis
 
 from app.config.settings import Settings
+from app.metrics import Metrics
 from app.models import Finding, PRContext, ReviewConfig, Severity
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ class AIReviewer:
             self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     def _budget_key(self) -> str:
-        return f"ai_tokens:{date.today().isoformat()}"
+        return f"{Metrics.AI_TOKENS_TODAY_PREFIX}:{date.today().isoformat()}"
 
     def _check_and_record_tokens(self, input_tokens: int, output_tokens: int) -> bool:
         """Returns False if daily budget is exceeded. Always records usage."""
@@ -57,11 +58,20 @@ class AIReviewer:
         total = input_tokens + output_tokens
         new_count = self._redis.incrby(key, total)
         self._redis.expire(key, 86400 * 2)  # keep 2 days for visibility
+        self._redis.hincrby(Metrics.AI_TOKENS_BY_PROVIDER_KEY, f"{self._provider}:input", input_tokens)
+        self._redis.hincrby(Metrics.AI_TOKENS_BY_PROVIDER_KEY, f"{self._provider}:output", output_tokens)
         if budget > 0 and (new_count - total) >= budget:
             logger.warning("Daily AI token budget (%d) exceeded: %d used today", budget, new_count)
+            self._redis.incr(Metrics.AI_BUDGET_EXCEEDED_KEY)
             return False
         logger.info("AI tokens used: input=%d output=%d daily_total=%d", input_tokens, output_tokens, new_count)
         return True
+
+    def _record_verify_fail_open(self) -> None:
+        try:
+            self._redis.hincrby(Metrics.SEMGREP_VERIFY_KEY, "fail_open", 1)
+        except Exception:
+            pass
 
     def _load_prompt(self, language: str) -> str:
         prompt_file = _PROMPTS_DIR / f"{language}_prompt.md"
@@ -228,6 +238,7 @@ class AIReviewer:
             used = int(self._redis.get(self._budget_key()) or 0)
             if used >= self._settings.AI_DAILY_TOKEN_BUDGET:
                 logger.warning("Daily AI token budget reached, skipping semgrep verification (failing open)")
+                self._record_verify_fail_open()
                 return findings
 
         files = {f.file for f in findings}
@@ -252,10 +263,12 @@ class AIReviewer:
             items = self._parse_response(text)
         except Exception as exc:
             logger.error("Semgrep AI verification call failed, keeping findings unverified: %s", exc)
+            self._record_verify_fail_open()
             return findings
 
         if not items:
             logger.warning("Semgrep AI verification returned no parseable verdicts, keeping findings unverified")
+            self._record_verify_fail_open()
             return findings
 
         confirmed_indexes: set[int] = set()

@@ -16,7 +16,9 @@
       "Bash(docker ps:*)",
       "Bash(ls -la /Users/rdovgan/Desktop/projects/work/code-review/.env*)",
       "Bash(chmod +x:*)",
-      "Bash(pytest *)"
+      "Bash(pytest *)",
+      "Bash(redis-server --port 6399 --daemonize yes --save \"\" --appendonly no)",
+      "Bash(redis-cli -p 6399 ping)"
     ]
   }
 }

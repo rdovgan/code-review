@@ -18,7 +18,18 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "links": [],
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": ["code-review-bot"],
+      "targetBlank": false,
+      "title": "Code Review Bot dashboards",
+      "type": "dashboards"
+    }
+  ],
   "panels": [
     {
       "fieldConfig": {
@@ -462,6 +473,11 @@
                   "color": "semi-dark-blue",
                   "index": 2,
                   "text": "Deduped"
+                },
+                "auth_failed": {
+                  "color": "dark-red",
+                  "index": 4,
+                  "text": "Auth Failed"
                 },
                 "error": {
                   "color": "red",
@@ -1503,7 +1519,7 @@
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": [],
+  "tags": ["code-review-bot"],
   "templating": {
     "list": []
   },
@@ -1515,6 +1531,6 @@
   "timezone": "",
   "title": "Code Review Bot",
   "uid": "code-review-bot",
-  "version": 14,
+  "version": 15,
   "weekStart": ""
 }

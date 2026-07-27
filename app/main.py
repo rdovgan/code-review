@@ -24,7 +24,7 @@ structlog.configure(
 logger = structlog.get_logger()
 
 settings = get_settings()
-metrics = Metrics(settings.REDIS_URL)
+metrics = Metrics(settings.REDIS_URL, ai_daily_token_budget=settings.AI_DAILY_TOKEN_BUDGET)
 
 
 @asynccontextmanager
@@ -146,6 +146,7 @@ async def webhook_bitbucket(request: Request):
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     if not adapter.validate_webhook(body, dict(request.headers)):
+        metrics.inc_webhook("auth_failed")
         return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
     event_key = request.headers.get("x-event-key", "")
@@ -181,6 +182,7 @@ async def webhook_github(request: Request):
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     if not adapter.validate_webhook(body, dict(request.headers)):
+        metrics.inc_webhook("auth_failed")
         return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
     event_type = request.headers.get("x-github-event", "")
@@ -216,6 +218,7 @@ async def webhook_gitlab(request: Request):
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     if not adapter.validate_webhook(body, dict(request.headers)):
+        metrics.inc_webhook("auth_failed")
         return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
     object_kind = payload.get("object_kind", "")

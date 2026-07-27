@@ -18,7 +18,18 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "links": [],
+  "links": [
+    {
+      "asDropdown": true,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": ["code-review-bot"],
+      "targetBlank": false,
+      "title": "Code Review Bot dashboards",
+      "type": "dashboards"
+    }
+  ],
   "panels": [
     {
       "description": "Total pull requests analyzed across all projects",
@@ -1381,7 +1392,8 @@
   "schemaVersion": 39,
   "tags": [
     "presentation",
-    "impact"
+    "impact",
+    "code-review-bot"
   ],
   "templating": {
     "list": []
@@ -1394,6 +1406,6 @@
   "timezone": "",
   "title": "Code Review Bot — Impact Report",
   "uid": "code-review-bot-impact",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

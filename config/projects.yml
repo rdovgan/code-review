@@ -58,6 +58,7 @@ projects:
       - bugs
 
   mybookingpal/web-messages:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -340,6 +341,7 @@ projects:
       - bugs
 
   mybookingpal/supplier-api:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -362,6 +364,7 @@ projects:
       - bugs
 
   mybookingpal/admin-portal:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -387,6 +390,7 @@ projects:
 # ── Python applications ───────────────────────────────────
 
   mybookingpal/image-tool:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: python
     ai_review: true

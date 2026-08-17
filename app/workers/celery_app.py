@@ -81,13 +81,20 @@ def _notify_mattermost(pr_context: PRContext, config, final_state: str, critical
         return
     status_emoji = "❌" if final_state == "failure" else "✅"
     status_label = "Review failed" if final_state == "failure" else "Review passed"
-    text = (
-        f"{status_emoji} **[PR #{pr_context.pr_id}]({_pr_url(pr_context)}) — {status_label}**\n"
-        f"`{pr_context.repo_full_name}` · {pr_context.author}\n"
-        f"> {pr_context.title}\n"
-        f"\n"
-        f"🔴 Critical: **{critical_count}**   |   🟠 Bugs: **{bug_count}**"
-    )
+    lines = [
+        f"{status_emoji} **[PR #{pr_context.pr_id} — {status_label}]({_pr_url(pr_context)})**",
+        f"`{pr_context.repo_full_name}` · {pr_context.author}",
+        f"> {pr_context.title}",
+    ]
+    stats = []
+    if critical_count > 0:
+        stats.append(f"🔴 Critical: **{critical_count}**")
+    if bug_count > 0:
+        stats.append(f"🟠 Bugs: **{bug_count}**")
+    if stats:
+        lines.append("")
+        lines.append("   |   ".join(stats))
+    text = "\n".join(lines)
     mattermost.send_message(settings.MATTERMOST_WEBHOOK_URL, text)
 
 

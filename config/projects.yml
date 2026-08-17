@@ -12,11 +12,26 @@
 # then add a webhook in Bitbucket. No restart required.
 
 
+# Java team Mattermost notifications — shared across all Java repos below.
+# The actual webhook URL is a secret and lives in .env (MATTERMOST_WEBHOOK_URL),
+# not here — this only lists who triggers a notification.
+# notify_authors matches PRContext.author, which for Bitbucket is the PR actor's
+# display name from the webhook payload (Bitbucket does not expose email here) —
+# confirm these match the real Bitbucket display names.
+x-java-team-notify: &java_team_notify
+  notify_authors:
+    - "Roman Dovgan"
+    - "Olena Syrotenko"
+    - "Oleksii Kravchenko"
+    - "Oleksandr Farion"
+    - "Ihor Romaniuk"
+
 projects:
 
 # ── Java applications ──────────────────────────────────────────────────
 
   mybookingpal/mbp:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -43,6 +58,7 @@ projects:
       - bugs
 
   mybookingpal/channel-batch-jobs:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -67,6 +83,7 @@ projects:
       - bugs
 
   mybookingpal/channel-integration:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -91,6 +108,7 @@ projects:
       - bugs
 
   mybookingpal/core-module:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -113,6 +131,7 @@ projects:
       - bugs
 
   mybookingpal/dataaccesslayer:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -135,6 +154,7 @@ projects:
       - bugs
 
   mybookingpal/revpal:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -157,6 +177,7 @@ projects:
       - bugs
 
   mybookingpal/redis:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -179,6 +200,7 @@ projects:
       - bugs
 
   mybookingpal/payment:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -204,6 +226,7 @@ projects:
       - bugs
 
   mybookingpal/cassandra:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -226,6 +249,7 @@ projects:
       - bugs
 
   mybookingpal/mbp-utils:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -247,6 +271,7 @@ projects:
       - bugs
 
   mybookingpal/cloud-services:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true
@@ -268,6 +293,7 @@ projects:
       - bugs
 
   mybookingpal/parent-dal:
+    <<: *java_team_notify
     target_branches: ["master", "main", "demo-dev", "demo-stable"]
     language: java
     ai_review: true

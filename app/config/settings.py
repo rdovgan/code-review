@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     MAX_DIFF_LINES: int = 500
     AI_DAILY_TOKEN_BUDGET: int = 100_000  # input+output tokens per day; 0 = unlimited
 
+    # Mattermost Incoming Webhook URL for author-based PR notifications
+    MATTERMOST_WEBHOOK_URL: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

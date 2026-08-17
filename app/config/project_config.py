@@ -24,7 +24,7 @@ _PROJECTS_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "projec
 
 _REVIEW_CONFIG_FIELDS = (
     "language", "ai_review", "static_analysis", "semgrep_ai_verify", "block_merge_on",
-    "max_diff_lines", "slack_channel", "mattermost_webhook_url", "notify_authors",
+    "max_diff_lines", "slack_channel", "notify_authors",
     "ignore_paths", "semgrep_rules", "ai_focus", "target_branches",
 )
 

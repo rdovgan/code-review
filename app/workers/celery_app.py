@@ -73,7 +73,7 @@ def _pr_url(pr_context: PRContext) -> str:
 
 
 def _notify_mattermost(pr_context: PRContext, config, final_state: str, critical_count: int, bug_count: int) -> None:
-    if not config.mattermost_webhook_url or not config.notify_authors:
+    if not settings.MATTERMOST_WEBHOOK_URL or not config.notify_authors:
         return
     if pr_context.author not in config.notify_authors:
         return
@@ -84,7 +84,7 @@ def _notify_mattermost(pr_context: PRContext, config, final_state: str, critical
         f"🔴 Critical: {critical_count}  |  🟠 Bugs: {bug_count}\n"
         f"{_pr_url(pr_context)}"
     )
-    mattermost.send_message(config.mattermost_webhook_url, text)
+    mattermost.send_message(settings.MATTERMOST_WEBHOOK_URL, text)
 
 
 def _build_summary(findings, critical_count, bug_count, perf_count, suggest_count) -> str:

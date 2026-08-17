@@ -33,11 +33,13 @@ class GithubAdapter(GitPlatform):
         return hmac_verify(self._secret, body, signature)
 
     def parse_webhook(self, payload: dict) -> Optional[PRContext]:
+        is_new_pr = False
         if "pull_request" in payload:
             action = payload.get("action", "")
             if action not in ("opened", "synchronize", "reopened"):
                 return None
             pr = payload["pull_request"]
+            is_new_pr = action == "opened"
         elif "comment" in payload and "issue" in payload:
             comment_body = payload["comment"].get("body", "").strip().lower()
             if comment_body != "review":
@@ -71,6 +73,7 @@ class GithubAdapter(GitPlatform):
             language="auto",
             diff="",
             changed_files=[],
+            is_new_pr=is_new_pr,
         )
 
     def get_diff(self, pr_context: PRContext) -> str:

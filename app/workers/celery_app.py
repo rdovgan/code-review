@@ -75,6 +75,8 @@ def _pr_url(pr_context: PRContext) -> str:
 def _notify_mattermost(pr_context: PRContext, config, final_state: str, critical_count: int, bug_count: int) -> None:
     if not settings.MATTERMOST_WEBHOOK_URL or not config.notify_authors:
         return
+    if not pr_context.is_new_pr:
+        return
     if pr_context.author not in config.notify_authors:
         return
     status_emoji = "❌" if final_state == "failure" else "✅"

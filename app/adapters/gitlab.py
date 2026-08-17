@@ -58,6 +58,7 @@ class GitlabAdapter(GitPlatform):
             language="auto",
             diff="",
             changed_files=[],
+            is_new_pr=action == "open",
         )
 
     def get_diff(self, pr_context: PRContext) -> str:

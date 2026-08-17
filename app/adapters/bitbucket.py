@@ -70,6 +70,8 @@ class BitbucketAdapter(GitPlatform):
         author = actor.get("display_name", actor.get("nickname", "unknown"))
         title = pr.get("title", "")
         pr_id = pr.get("id", 0)
+        # pullrequest:created has no "changes" key and no "comment" key
+        is_new_pr = comment is None and changes is None
 
         return PRContext(
             platform="bitbucket",
@@ -83,6 +85,7 @@ class BitbucketAdapter(GitPlatform):
             language="auto",
             diff="",
             changed_files=[],
+            is_new_pr=is_new_pr,
         )
 
     def get_diff(self, pr_context: PRContext) -> str:

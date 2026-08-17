@@ -58,6 +58,8 @@ class ReviewConfig:
     block_merge_on: list[str] = field(default_factory=lambda: ["CRITICAL"])
     max_diff_lines: int = 500
     slack_channel: str = ""
+    mattermost_webhook_url: str = ""
+    notify_authors: list[str] = field(default_factory=list)
     ignore_paths: list[str] = field(default_factory=list)
     semgrep_rules: list[str] = field(default_factory=lambda: ["owasp", "security-audit"])
     ai_focus: list[str] = field(default_factory=lambda: ["security", "bugs"])

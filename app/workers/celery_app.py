@@ -14,6 +14,7 @@ from app.config.project_config import detect_language, load_project_config
 from app.config.settings import get_settings
 from app.metrics import Metrics
 from app.models import PRContext, Severity
+from app.notifiers import mattermost
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,31 @@ celery_app.conf.update(
     task_time_limit=720,
     task_soft_time_limit=660,
 )
+
+
+def _pr_url(pr_context: PRContext) -> str:
+    if pr_context.platform == "bitbucket":
+        return f"https://bitbucket.org/{pr_context.repo_full_name}/pull-requests/{pr_context.pr_id}"
+    if pr_context.platform == "github":
+        return f"https://github.com/{pr_context.repo_full_name}/pull/{pr_context.pr_id}"
+    if pr_context.platform == "gitlab":
+        return f"https://gitlab.com/{pr_context.repo_full_name}/-/merge_requests/{pr_context.pr_id}"
+    return ""
+
+
+def _notify_mattermost(pr_context: PRContext, config, final_state: str, critical_count: int, bug_count: int) -> None:
+    if not config.mattermost_webhook_url or not config.notify_authors:
+        return
+    if pr_context.author not in config.notify_authors:
+        return
+    status_emoji = "❌" if final_state == "failure" else "✅"
+    text = (
+        f"{status_emoji} **{pr_context.author}** — PR #{pr_context.pr_id} in `{pr_context.repo_full_name}`\n"
+        f"{pr_context.title}\n"
+        f"🔴 Critical: {critical_count}  |  🟠 Bugs: {bug_count}\n"
+        f"{_pr_url(pr_context)}"
+    )
+    mattermost.send_message(config.mattermost_webhook_url, text)
 
 
 def _build_summary(findings, critical_count, bug_count, perf_count, suggest_count) -> str:
@@ -213,6 +239,11 @@ def process_review(self, task_payload: dict) -> dict:
 
     final_state = "failure" if any(f.severity.value in config.block_merge_on for f in findings) else "success"
     adapter.set_review_status(pr_context, final_state, f"{len(findings)} issues found")
+
+    try:
+        _notify_mattermost(pr_context, config, final_state, critical_count, bug_count)
+    except Exception as exc:
+        logger.warning("%s Failed to send Mattermost notification: %s", pr_tag, exc)
 
     duration_ms = round((time.monotonic() - review_start) * 1000)
     metrics.record_review(

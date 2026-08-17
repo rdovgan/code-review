@@ -57,7 +57,9 @@ services:
   prometheus:
     image: prom/prometheus:v2.52.0
     ports:
-      - "9090:9090"
+      # Bound to loopback only so nginx can own the public :9090 and route
+      # /task* to the Task Decomposition Tool, everything else to Prometheus.
+      - "127.0.0.1:19090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus

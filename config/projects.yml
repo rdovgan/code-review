@@ -38,7 +38,7 @@ projects:
     static_analysis: false
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 5000
+    max_diff_lines: 15000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -46,6 +46,30 @@ projects:
       - "**/*.csv"
       - "**/*.xlsx"
       - ".idea/**"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/sql-injection
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/web-messages:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 5000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.log"
+      - "**/*.csv"
     semgrep_rules:
       - owasp
       - security-audit
@@ -65,7 +89,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 2500
+    max_diff_lines: 5000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -90,7 +114,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 1500
+    max_diff_lines: 5000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -115,7 +139,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 4000
+    max_diff_lines: 10000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -138,7 +162,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 2500
+    max_diff_lines: 10000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -161,7 +185,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 2500
+    max_diff_lines: 15000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -184,7 +208,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 500
+    max_diff_lines: 5000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -207,7 +231,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 1500
+    max_diff_lines: 15000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -233,7 +257,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 2500
+    max_diff_lines: 15000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -256,7 +280,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 1000
+    max_diff_lines: 10000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -278,7 +302,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 2500
+    max_diff_lines: 10000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -300,7 +324,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 2500
+    max_diff_lines: 15000
     ignore_paths:
       - "**/*.properties"
       - "**/*.md"
@@ -315,6 +339,51 @@ projects:
       - security
       - bugs
 
+  mybookingpal/supplier-api:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 15000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.sh"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+  mybookingpal/admin-portal:
+    target_branches: ["master", "main", "demo-dev", "demo-stable"]
+    language: java
+    ai_review: true
+    static_analysis: true
+    block_merge_on:
+      - CRITICAL
+    max_diff_lines: 15000
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - "**/*.sh"
+    semgrep_rules:
+      - owasp
+      - security-audit
+      - p/java
+      - p/findsecbugs
+      - p/secrets
+    ai_focus:
+      - security
+      - bugs
+
+
 # ── Python applications ───────────────────────────────────
 
   mybookingpal/image-tool:
@@ -324,7 +393,7 @@ projects:
     static_analysis: true
     block_merge_on:
       - CRITICAL
-    max_diff_lines: 2500
+    max_diff_lines: 10000
     ignore_paths:
       - "migrations/*"
       - "tests/*"

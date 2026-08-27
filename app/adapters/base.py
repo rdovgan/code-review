@@ -26,6 +26,11 @@ class GitPlatform(ABC):
     def get_changed_files(self, pr_context: PRContext) -> list[str]: ...
 
     @abstractmethod
+    def get_pr_commits(self, pr_context: PRContext) -> list[str]:
+        """Return commit subjects (first line of message) of the PR, oldest first."""
+        ...
+
+    @abstractmethod
     def get_file_content(self, pr_context: PRContext, path: str, ref: str) -> Optional[str]: ...
 
     @abstractmethod

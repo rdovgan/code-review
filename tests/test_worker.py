@@ -196,3 +196,72 @@ def test_process_review_too_large(mock_config, mock_get_adapter):
     call_body = mock_adapter.post_summary_comment.call_args[0][1]
     assert "too large" in call_body.lower()
     assert result["reason"] == "diff_too_large"
+
+
+def test_notify_mattermost_format():
+    from app.workers import celery_app
+
+    adapter = MagicMock()
+    adapter.get_pr_commits.return_value = ["feat: add login", "fix: token expiry"]
+    ctx = _make_pr_context(
+        repo_full_name="workspace/myrepo",
+        title="Add user authentication feature",
+        source_branch="feature/auth",
+        target_branch="main",
+        author="dev",
+        is_new_pr=True,
+    )
+    config = ReviewConfig(notify_authors=["dev"])
+
+    with patch.object(celery_app.settings, "MATTERMOST_WEBHOOK_URL", "https://mm.example/hook/xxx"):
+        with patch("app.workers.celery_app.mattermost.send_message") as mock_send:
+            celery_app._notify_mattermost(adapter, ctx, config, "success", critical_count=1, bug_count=2)
+
+    mock_send.assert_called_once()
+    url, text = mock_send.call_args[0]
+    assert url == "https://mm.example/hook/xxx"
+    assert "**[myrepo / Add user authentication feature](https://bitbucket.org/workspace/myrepo/pull-requests/1)**" in text
+    assert "`feature/auth` → `main`" in text
+    assert "dev" in text
+    assert "**Commits:**" in text
+    assert "- feat: add login" in text
+    assert "- fix: token expiry" in text
+    assert "Critical: **1**" in text
+    assert "Bugs: **2**" in text
+
+
+def test_notify_mattermost_commits_fetch_failure_is_best_effort():
+    from app.workers import celery_app
+
+    adapter = MagicMock()
+    adapter.get_pr_commits.side_effect = RuntimeError("api down")
+    ctx = _make_pr_context(
+        repo_full_name="workspace/myrepo",
+        source_branch="feature/auth",
+        author="dev",
+        is_new_pr=True,
+    )
+    config = ReviewConfig(notify_authors=["dev"])
+
+    with patch.object(celery_app.settings, "MATTERMOST_WEBHOOK_URL", "https://mm.example/hook/xxx"):
+        with patch("app.workers.celery_app.mattermost.send_message") as mock_send:
+            celery_app._notify_mattermost(adapter, ctx, config, "failure", critical_count=0, bug_count=0)
+
+    mock_send.assert_called_once()
+    url, text = mock_send.call_args[0]
+    assert "**Commits:**" not in text
+    assert "❌" in text
+
+
+def test_notify_mattermost_skipped_when_not_in_notify_authors():
+    from app.workers import celery_app
+
+    adapter = MagicMock()
+    ctx = _make_pr_context(author="someone-else", is_new_pr=True)
+    config = ReviewConfig(notify_authors=["dev"])
+
+    with patch.object(celery_app.settings, "MATTERMOST_WEBHOOK_URL", "https://mm.example/hook/xxx"):
+        with patch("app.workers.celery_app.mattermost.send_message") as mock_send:
+            celery_app._notify_mattermost(adapter, ctx, config, "success", critical_count=0, bug_count=0)
+
+    mock_send.assert_not_called()

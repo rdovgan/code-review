@@ -55,6 +55,7 @@ class GitlabAdapter(GitPlatform):
             author=payload.get("user", {}).get("username", "unknown"),
             title=attrs.get("title", ""),
             target_branch=attrs.get("target_branch", "main"),
+            source_branch=attrs.get("source_branch", ""),
             language="auto",
             diff="",
             changed_files=[],
@@ -79,6 +80,13 @@ class GitlabAdapter(GitPlatform):
         resp = self._client.get(url)
         resp.raise_for_status()
         return [d.get("new_path", d.get("old_path", "")) for d in resp.json()]
+
+    def get_pr_commits(self, pr_context: PRContext) -> list[str]:
+        project = self._encode_project(pr_context.repo_full_name)
+        url = f"{self._base_url}/projects/{project}/merge_requests/{pr_context.pr_id}/commits"
+        resp = self._client.get(url)
+        resp.raise_for_status()
+        return [c.get("title", "").strip() for c in resp.json() if c.get("title", "").strip()]
 
     def get_file_content(self, pr_context: PRContext, path: str, ref: str) -> Optional[str]:
         project = self._encode_project(pr_context.repo_full_name)

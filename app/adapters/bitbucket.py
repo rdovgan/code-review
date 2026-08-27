@@ -67,6 +67,7 @@ class BitbucketAdapter(GitPlatform):
         base_sha = pr.get("destination", {}).get("commit", {}).get("hash", "")
         head_sha = pr.get("source", {}).get("commit", {}).get("hash", "")
         target_branch = pr.get("destination", {}).get("branch", {}).get("name", "main")
+        source_branch = pr.get("source", {}).get("branch", {}).get("name", "")
         author = actor.get("display_name", actor.get("nickname", "unknown"))
         title = pr.get("title", "")
         pr_id = pr.get("id", 0)
@@ -82,6 +83,7 @@ class BitbucketAdapter(GitPlatform):
             author=author,
             title=title,
             target_branch=target_branch,
+            source_branch=source_branch,
             language="auto",
             diff="",
             changed_files=[],
@@ -107,6 +109,17 @@ class BitbucketAdapter(GitPlatform):
             if new_path and new_path.get("path"):
                 files.append(new_path["path"])
         return files
+
+    def get_pr_commits(self, pr_context: PRContext) -> list[str]:
+        workspace, repo = pr_context.repo_full_name.split("/", 1)
+        url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/commits"
+        resp = self._client.get(url)
+        resp.raise_for_status()
+        return [
+            c.get("message", "").strip().splitlines()[0]
+            for c in resp.json().get("values", [])
+            if c.get("message", "").strip()
+        ]
 
     def get_file_content(self, pr_context: PRContext, path: str, ref: str) -> Optional[str]:
         workspace, repo = pr_context.repo_full_name.split("/", 1)

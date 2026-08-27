@@ -72,7 +72,7 @@ def _pr_url(pr_context: PRContext) -> str:
     return ""
 
 
-def _notify_mattermost(pr_context: PRContext, config, final_state: str, critical_count: int, bug_count: int) -> None:
+def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str, critical_count: int, bug_count: int) -> None:
     if not settings.MATTERMOST_WEBHOOK_URL or not config.notify_authors:
         return
     if not pr_context.is_new_pr:
@@ -80,12 +80,26 @@ def _notify_mattermost(pr_context: PRContext, config, final_state: str, critical
     if pr_context.author not in config.notify_authors:
         return
     status_emoji = "❌" if final_state == "failure" else "✅"
-    status_label = "Review failed" if final_state == "failure" else "Review passed"
+    repo_name = pr_context.repo_full_name.split("/")[-1]
+    if pr_context.source_branch:
+        branch_line = f"`{pr_context.source_branch}` → `{pr_context.target_branch}`"
+    else:
+        branch_line = f"`{pr_context.target_branch}`"
     lines = [
-        f"{status_emoji} **[PR #{pr_context.pr_id} — {status_label}]({_pr_url(pr_context)})**",
-        f"`{pr_context.repo_full_name}` · {pr_context.author}",
-        f"> {pr_context.title}",
+        f"{status_emoji} **[{repo_name} / {pr_context.title}]({_pr_url(pr_context)})**",
+        f"{branch_line} · {pr_context.author}",
     ]
+    # Commit list is best-effort — a fetch failure must not block the notification
+    try:
+        commits = adapter.get_pr_commits(pr_context)
+    except Exception as exc:
+        logger.warning("[PR #%s %s] Failed to fetch commits for Mattermost notification: %s",
+                       pr_context.pr_id, pr_context.repo_full_name, exc)
+        commits = []
+    if commits:
+        lines.append("")
+        lines.append("**Commits:**")
+        lines.extend(f"- {c}" for c in commits)
     stats = []
     if critical_count > 0:
         stats.append(f"🔴 Critical: **{critical_count}**")
@@ -252,7 +266,7 @@ def process_review(self, task_payload: dict) -> dict:
     adapter.set_review_status(pr_context, final_state, f"{len(findings)} issues found")
 
     try:
-        _notify_mattermost(pr_context, config, final_state, critical_count, bug_count)
+        _notify_mattermost(adapter, pr_context, config, final_state, critical_count, bug_count)
     except Exception as exc:
         logger.warning("%s Failed to send Mattermost notification: %s", pr_tag, exc)
 

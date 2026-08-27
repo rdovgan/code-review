@@ -61,6 +61,8 @@ def test_bitbucket_parse_created():
     assert ctx.author == "Jane Developer"
     assert ctx.title == "Add user authentication feature"
     assert ctx.platform == "bitbucket"
+    assert ctx.source_branch == "feature/auth"
+    assert ctx.target_branch == "main"
 
 
 def test_bitbucket_parse_ignored_event():

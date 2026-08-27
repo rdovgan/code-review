@@ -70,6 +70,7 @@ class GithubAdapter(GitPlatform):
             author=pr.get("user", {}).get("login", "unknown"),
             title=pr.get("title", ""),
             target_branch=pr.get("base", {}).get("ref", "main"),
+            source_branch=pr.get("head", {}).get("ref", ""),
             language="auto",
             diff="",
             changed_files=[],
@@ -90,6 +91,17 @@ class GithubAdapter(GitPlatform):
         resp = self._client.get(url)
         resp.raise_for_status()
         return [f["filename"] for f in resp.json()]
+
+    def get_pr_commits(self, pr_context: PRContext) -> list[str]:
+        owner, repo = pr_context.repo_full_name.split("/", 1)
+        url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_context.pr_id}/commits"
+        resp = self._client.get(url)
+        resp.raise_for_status()
+        return [
+            c.get("commit", {}).get("message", "").strip().splitlines()[0]
+            for c in resp.json()
+            if c.get("commit", {}).get("message", "").strip()
+        ]
 
     def get_file_content(self, pr_context: PRContext, path: str, ref: str) -> Optional[str]:
         owner, repo = pr_context.repo_full_name.split("/", 1)

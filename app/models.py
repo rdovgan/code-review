@@ -46,6 +46,7 @@ class PRContext:
     language: str
     diff: str
     target_branch: str = "main"
+    source_branch: str = ""
     changed_files: list[str] = field(default_factory=list)
     is_new_pr: bool = False
 

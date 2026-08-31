@@ -72,7 +72,15 @@ def _pr_url(pr_context: PRContext) -> str:
     return ""
 
 
-def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str, critical_count: int, bug_count: int) -> None:
+# Mattermost message-attachment colours (left border): green on pass, red on fail
+_MM_COLOR_PASS = "#3EB489"
+_MM_COLOR_FAIL = "#D24B4A"
+_MM_MAX_COMMITS = 8
+_MM_MAX_COMMIT_LEN = 72
+
+
+def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str, critical_count: int,
+                       bug_count: int, summary_comment_id: str = "") -> None:
     if not settings.MATTERMOST_WEBHOOK_URL or not config.notify_authors:
         return
     if not pr_context.is_new_pr:
@@ -81,12 +89,13 @@ def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str,
         return
     status_emoji = "❌" if final_state == "failure" else "✅"
     repo_name = pr_context.repo_full_name.split("/")[-1]
+    pr_url = _pr_url(pr_context)
     if pr_context.source_branch:
         branch_line = f"`{pr_context.source_branch}` → `{pr_context.target_branch}`"
     else:
         branch_line = f"`{pr_context.target_branch}`"
     lines = [
-        f"{status_emoji} **[{repo_name} / {pr_context.title}]({_pr_url(pr_context)})**",
+        f"{status_emoji} **[{repo_name} / {pr_context.title}]({pr_url})**",
         f"{branch_line} · {pr_context.author}",
     ]
     # Commit list is best-effort — a fetch failure must not block the notification
@@ -99,17 +108,31 @@ def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str,
     if commits:
         lines.append("")
         lines.append("**Commits:**")
-        lines.extend(f"- {c}" for c in commits)
+        for c in commits[:_MM_MAX_COMMITS]:
+            c = c.strip()
+            if len(c) > _MM_MAX_COMMIT_LEN:
+                c = c[:_MM_MAX_COMMIT_LEN - 1].rstrip() + "…"
+            lines.append(f"- {c}")
+        if len(commits) > _MM_MAX_COMMITS:
+            lines.append(f"- …and {len(commits) - _MM_MAX_COMMITS} more")
+
+    lines.append("")
+    lines.append("---")
     stats = []
     if critical_count > 0:
         stats.append(f"🔴 Critical: **{critical_count}**")
     if bug_count > 0:
         stats.append(f"🟠 Bugs: **{bug_count}**")
-    if stats:
-        lines.append("")
-        lines.append("   |   ".join(stats))
-    text = "\n".join(lines)
-    mattermost.send_message(settings.MATTERMOST_WEBHOOK_URL, text)
+    lines.append("   |   ".join(stats) if stats else "✅ No critical issues or bugs found")
+    if summary_comment_id and pr_url:
+        lines.append(f"[View review comment →]({pr_url}#comment-{summary_comment_id})")
+
+    attachment = {
+        "color": _MM_COLOR_FAIL if final_state == "failure" else _MM_COLOR_PASS,
+        "fallback": f"{status_emoji} {repo_name} / {pr_context.title}",
+        "text": "\n".join(lines),
+    }
+    mattermost.send_message(settings.MATTERMOST_WEBHOOK_URL, attachments=[attachment])
 
 
 def _build_summary(findings, critical_count, bug_count, perf_count, suggest_count) -> str:
@@ -252,12 +275,13 @@ def process_review(self, task_payload: dict) -> dict:
     perf_count = sum(1 for f in findings if f.severity == Severity.PERFORMANCE)
     suggest_count = sum(1 for f in findings if f.severity == Severity.SUGGEST)
 
+    summary_comment_id = ""
     if findings or truncated:
         summary = _build_summary(findings, critical_count, bug_count, perf_count, suggest_count)
         if truncated:
             summary += f"\n\n> ⚠️ PR has {diff_lines} lines. Analysis was performed on the first {config.max_diff_lines} lines."
         try:
-            adapter.post_summary_comment(pr_context, summary)
+            summary_comment_id = adapter.post_summary_comment(pr_context, summary) or ""
             logger.info("%s Summary comment posted — %d inline comment(s)", pr_tag, inline_count)
         except Exception as exc:
             logger.warning("%s Failed to post summary comment: %s", pr_tag, exc)
@@ -266,7 +290,7 @@ def process_review(self, task_payload: dict) -> dict:
     adapter.set_review_status(pr_context, final_state, f"{len(findings)} issues found")
 
     try:
-        _notify_mattermost(adapter, pr_context, config, final_state, critical_count, bug_count)
+        _notify_mattermost(adapter, pr_context, config, final_state, critical_count, bug_count, summary_comment_id)
     except Exception as exc:
         logger.warning("%s Failed to send Mattermost notification: %s", pr_tag, exc)
 

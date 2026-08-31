@@ -215,11 +215,15 @@ def test_notify_mattermost_format():
 
     with patch.object(celery_app.settings, "MATTERMOST_WEBHOOK_URL", "https://mm.example/hook/xxx"):
         with patch("app.workers.celery_app.mattermost.send_message") as mock_send:
-            celery_app._notify_mattermost(adapter, ctx, config, "success", critical_count=1, bug_count=2)
+            celery_app._notify_mattermost(adapter, ctx, config, "success", critical_count=1, bug_count=2,
+                                          summary_comment_id="4242")
 
     mock_send.assert_called_once()
-    url, text = mock_send.call_args[0]
+    url = mock_send.call_args[0][0]
+    attachment = mock_send.call_args.kwargs["attachments"][0]
+    text = attachment["text"]
     assert url == "https://mm.example/hook/xxx"
+    assert attachment["color"] == celery_app._MM_COLOR_PASS
     assert "**[myrepo / Add user authentication feature](https://bitbucket.org/workspace/myrepo/pull-requests/1)**" in text
     assert "`feature/auth` → `main`" in text
     assert "dev" in text
@@ -228,6 +232,7 @@ def test_notify_mattermost_format():
     assert "- fix: token expiry" in text
     assert "Critical: **1**" in text
     assert "Bugs: **2**" in text
+    assert "[View review comment →](https://bitbucket.org/workspace/myrepo/pull-requests/1#comment-4242)" in text
 
 
 def test_notify_mattermost_commits_fetch_failure_is_best_effort():
@@ -248,9 +253,12 @@ def test_notify_mattermost_commits_fetch_failure_is_best_effort():
             celery_app._notify_mattermost(adapter, ctx, config, "failure", critical_count=0, bug_count=0)
 
     mock_send.assert_called_once()
-    url, text = mock_send.call_args[0]
+    attachment = mock_send.call_args.kwargs["attachments"][0]
+    text = attachment["text"]
+    assert attachment["color"] == celery_app._MM_COLOR_FAIL
     assert "**Commits:**" not in text
     assert "❌" in text
+    assert "No critical issues or bugs found" in text
 
 
 def test_notify_mattermost_skipped_when_not_in_notify_authors():

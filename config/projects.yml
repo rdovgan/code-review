@@ -414,7 +414,7 @@ projects:
 
   # ── React / TypeScript frontend ───────────────────────────────────
   mybookingpal/admin-portal-ui:
-    target_branches: ["master", "main", "demo-dev", "demo-stable", "hotfixes", "demo"]
+    target_branches: []  # empty = review PRs to any target branch
     language: js
     ai_review: true
     static_analysis: true
@@ -437,7 +437,7 @@ projects:
       - bugs
 
   mybookingpal/revpal-plus-ui:
-    target_branches: ["master", "main", "demo-dev", "demo-stable", "hotfixes", "demo"]
+    target_branches: []  # empty = review PRs to any target branch
     language: js
     ai_review: true
     static_analysis: true
@@ -460,7 +460,7 @@ projects:
       - bugs
 
   mybookingpal/wizard-ui:
-    target_branches: ["master", "main", "demo-dev", "demo-stable", "hotfixes", "demo"]
+    target_branches: []  # empty = review PRs to any target branch
     language: js
     ai_review: true
     static_analysis: true
@@ -483,7 +483,7 @@ projects:
       - bugs
 
   mybookingpal/marriott-ui:
-    target_branches: ["master", "main", "demo-dev", "demo-stable", "hotfixes", "demo"]
+    target_branches: []  # empty = review PRs to any target branch
     language: js
     ai_review: true
     static_analysis: true

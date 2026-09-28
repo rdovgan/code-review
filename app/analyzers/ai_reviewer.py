@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -177,8 +178,11 @@ class AIReviewer:
     _MAX_CONSECUTIVE_PARSE_FAILURES = 2
     # Cap on number of AI chunks to process (prevents runaway costs on huge PRs)
     _MAX_CHUNKS = 15
+    # Stop processing chunks this many seconds before the deadline so the task
+    # can still merge findings, post comments and finalize the build status.
+    _DEADLINE_RESERVE_SECONDS = 60
 
-    def review(self, pr_context: PRContext, config: ReviewConfig) -> list[Finding]:
+    def review(self, pr_context: PRContext, config: ReviewConfig, deadline: Optional[float] = None) -> list[Finding]:
         prompt = self._load_prompt(pr_context.language)
         chunks = self._split_if_needed(pr_context.diff)
         if len(chunks) > self._MAX_CHUNKS:
@@ -190,6 +194,15 @@ class AIReviewer:
         findings: list[Finding] = []
         consecutive_parse_failures = 0
         for i, chunk in enumerate(chunks):
+            # Wall-clock guard: stop before the task's Celery time limit kills
+            # us mid-review — partial findings still get posted and the build
+            # status gets finalized instead of being stuck on "in progress".
+            if deadline is not None and time.monotonic() > deadline - self._DEADLINE_RESERVE_SECONDS:
+                logger.warning(
+                    "AI review deadline reached (%d/%d chunks) — returning %d partial finding(s)",
+                    i, len(chunks), len(findings),
+                )
+                break
             # Pre-check budget before sending
             if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
                 used = int(self._redis.get(self._budget_key()) or 0)

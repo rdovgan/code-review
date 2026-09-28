@@ -40,10 +40,13 @@ def on_task_retry(sender, request, reason, einfo, **kwargs):
     logger.warning("Task %s retrying: %s", request.id, reason)
     metrics.inc_task_retry()
 
-# Base time limits — dynamically scaled per task in process_review()
-_BASE_SOFT_TIME_LIMIT = 240   # 4 min base
-_BASE_TIME_LIMIT = 300        # 5 min base
-_EXTRA_SECONDS_PER_FILE = 5   # add 5s per file for large PRs
+# Base time limits — dynamically scaled per task in main._queue_review()
+_BASE_SOFT_TIME_LIMIT = 300   # 5 min base
+_BASE_TIME_LIMIT = 360        # 6 min base
+_EXTRA_SECONDS_PER_FILE = 15  # add 15s per file — one AI chunk takes ~30–60s
+# Cap on the file count used for limit scaling — keeps the scaled hard limit
+# below the global safety net (360 + 60*15 = 1260s < 1740s)
+_MAX_FILE_COUNT_FOR_LIMITS = 60
 
 celery_app = Celery(
     "code_review",
@@ -57,8 +60,8 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     # Global safety net — individual tasks override via apply_async
-    task_time_limit=720,
-    task_soft_time_limit=660,
+    task_time_limit=1800,
+    task_soft_time_limit=1740,
 )
 
 
@@ -75,7 +78,7 @@ def _pr_url(pr_context: PRContext) -> str:
 # Mattermost message-attachment colours (left border): green on pass, red on fail
 _MM_COLOR_PASS = "#3EB489"
 _MM_COLOR_FAIL = "#D24B4A"
-_MM_MAX_COMMITS = 8
+_MM_MAX_COMMITS = 3
 _MM_MAX_COMMIT_LEN = 72
 
 
@@ -107,7 +110,6 @@ def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str,
         commits = []
     if commits:
         lines.append("")
-        lines.append("**Commits:**")
         for c in commits[:_MM_MAX_COMMITS]:
             c = c.strip()
             if len(c) > _MM_MAX_COMMIT_LEN:
@@ -223,7 +225,16 @@ def process_review(self, task_payload: dict) -> dict:
             logger.info("%s Step 2/2: AI review started", pr_tag)
             try:
                 ai_reviewer = ai_reviewer or AIReviewer(settings)
-                ai_results = ai_reviewer.review(pr_context, config)
+                # Deadline = the task's soft time limit. The reviewer stops
+                # processing chunks shortly before it and returns partial
+                # findings, so the build status always gets finalized instead
+                # of the worker being SIGKILLed mid-review.
+                # Celery delivers limits as request.timelimit = (hard, soft).
+                deadline = None
+                timelimit = getattr(self.request, "timelimit", None)
+                if timelimit and len(timelimit) == 2 and timelimit[1]:
+                    deadline = time.monotonic() + timelimit[1]
+                ai_results = ai_reviewer.review(pr_context, config, deadline=deadline)
                 logger.info("%s Step 2/2: AI review complete — %d finding(s)", pr_tag, len(ai_results))
             except Exception as exc:
                 logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)

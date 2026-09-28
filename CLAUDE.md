@@ -115,6 +115,7 @@ docker compose up --build
 | Central `config/projects.yml` | Onboard projects without touching their codebase; `.codereview.yml` in repo can override |
 | Graceful analyzer failures | If Semgrep or AI fails, task continues with the other's results |
 | Semgrep findings AI-verified before posting (`semgrep_ai_verify`) | Cuts static-analysis false positives; fails open (keeps findings unfiltered) if verification errors out — a verification hiccup must never hide a real finding |
+| Dynamic per-PR time limits + deadline-aware AI chunks | Bitbucket webhooks carry no file list, so limits scale by the real diffstat (fetched at enqueue); the AI chunk loop stops before the Celery soft limit and returns partial findings — the build status always gets finalized instead of the worker being SIGKILLed mid-review (stuck "in progress") |
 
 ## Roadmap
 

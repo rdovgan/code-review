@@ -48,7 +48,7 @@ def test_process_review_posts_comments(mock_config, mock_semgrep_cls, mock_ai_cl
     config = ReviewConfig()
     mock_config.return_value = config
 
-    finding = _make_finding(Severity.SUGGEST)
+    finding = _make_finding(Severity.BUG)  # BUG posts inline; SUGGEST is summary-only
     mock_ai_cls.return_value.review.return_value = [finding]
     mock_semgrep_cls.return_value.run.return_value = []
 
@@ -105,6 +105,38 @@ def test_process_review_verifies_semgrep_findings_with_ai(mock_config, mock_semg
     called_findings = mock_ai_cls.return_value.verify_semgrep_findings.call_args[0][0]
     assert called_findings == [raw_finding]
     assert result["findings"] == 1
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_process_review_passes_soft_limit_deadline_to_reviewer(mock_config, mock_semgrep_cls, mock_ai_cls, mock_get_adapter):
+    """The AI chunk loop must know the task's soft time limit so it can stop
+    early with partial findings instead of being SIGKILLed (PR #3565 bug)."""
+    mock_adapter = MagicMock()
+    mock_adapter.get_diff.return_value = "x"
+    mock_adapter.get_changed_files.return_value = ["Foo.java"]
+    mock_adapter.get_existing_bot_comments.return_value = []
+    mock_get_adapter.return_value = mock_adapter
+    mock_config.return_value = ReviewConfig()
+    mock_semgrep_cls.return_value.run.return_value = []
+
+    from app.workers.celery_app import process_review
+
+    ctx = _make_pr_context()
+    payload = {"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx)}
+    payload["platform"] = "bitbucket"
+
+    process_review.request.timelimit = (945, 885)  # (hard, soft) as delivered by Celery
+    try:
+        with patch("app.workers.celery_app.time.monotonic", return_value=1000.0):
+            process_review.run(payload)
+    finally:
+        process_review.request.timelimit = None
+
+    kwargs = mock_ai_cls.return_value.review.call_args.kwargs
+    assert kwargs["deadline"] == 1000.0 + 885
 
 
 @patch("app.workers.celery_app.get_adapter")
@@ -174,14 +206,19 @@ def test_process_review_failure_status_on_critical(mock_config, mock_semgrep_cls
 
 
 @patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
 @patch("app.workers.celery_app.load_project_config")
-def test_process_review_too_large(mock_config, mock_get_adapter):
+def test_process_review_truncates_large_diff(mock_config, mock_semgrep_cls, mock_ai_cls, mock_get_adapter):
     mock_adapter = MagicMock()
     mock_adapter.get_changed_files.return_value = ["Foo.java"]
+    mock_adapter.get_existing_bot_comments.return_value = []
     mock_get_adapter.return_value = mock_adapter
 
     config = ReviewConfig(max_diff_lines=5)
     mock_config.return_value = config
+    mock_semgrep_cls.return_value.run.return_value = []
+    mock_ai_cls.return_value.review.return_value = []
 
     large_diff = "\n".join(f"line {i}" for i in range(100))
     ctx = _make_pr_context(diff=large_diff)
@@ -192,10 +229,11 @@ def test_process_review_too_large(mock_config, mock_get_adapter):
 
     result = process_review.run(payload)
 
+    # Review continues on the truncated diff and notes the truncation in the summary
     mock_adapter.post_summary_comment.assert_called_once()
     call_body = mock_adapter.post_summary_comment.call_args[0][1]
-    assert "too large" in call_body.lower()
-    assert result["reason"] == "diff_too_large"
+    assert "100 lines" in call_body
+    assert result["status"] in ("success", "failure")
 
 
 def test_notify_mattermost_format():
@@ -227,7 +265,6 @@ def test_notify_mattermost_format():
     assert "**[myrepo / Add user authentication feature](https://bitbucket.org/workspace/myrepo/pull-requests/1)**" in text
     assert "`feature/auth` → `main`" in text
     assert "dev" in text
-    assert "**Commits:**" in text
     assert "- feat: add login" in text
     assert "- fix: token expiry" in text
     assert "Critical: **1**" in text
@@ -256,9 +293,36 @@ def test_notify_mattermost_commits_fetch_failure_is_best_effort():
     attachment = mock_send.call_args.kwargs["attachments"][0]
     text = attachment["text"]
     assert attachment["color"] == celery_app._MM_COLOR_FAIL
-    assert "**Commits:**" not in text
+    assert "- " not in text  # no commit bullets when the fetch fails
     assert "❌" in text
     assert "No critical issues or bugs found" in text
+
+
+def test_notify_mattermost_commits_truncated_to_max():
+    from app.workers import celery_app
+
+    adapter = MagicMock()
+    adapter.get_pr_commits.return_value = [
+        "feat: add login",
+        "fix: token expiry",
+        "refactor: extract helper",
+        "chore: bump deps",
+        "docs: update readme",
+    ]
+    ctx = _make_pr_context(author="dev", is_new_pr=True)
+    config = ReviewConfig(notify_authors=["dev"])
+
+    with patch.object(celery_app.settings, "MATTERMOST_WEBHOOK_URL", "https://mm.example/hook/xxx"):
+        with patch("app.workers.celery_app.mattermost.send_message") as mock_send:
+            celery_app._notify_mattermost(adapter, ctx, config, "success", critical_count=0, bug_count=0)
+
+    text = mock_send.call_args.kwargs["attachments"][0]["text"]
+    assert "- feat: add login" in text
+    assert "- fix: token expiry" in text
+    assert "- refactor: extract helper" in text
+    assert "- chore: bump deps" not in text
+    assert "- docs: update readme" not in text
+    assert "…and 2 more" in text
 
 
 def test_notify_mattermost_skipped_when_not_in_notify_authors():

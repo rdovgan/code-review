@@ -1,6 +1,7 @@
 import fnmatch
 import json
 import logging
+import os
 import subprocess
 import tempfile
 import time
@@ -73,10 +74,15 @@ class SemgrepRunner:
                 cmd += ["--config", mapped]
             cmd.append(".")
 
+            # Semgrep writes downloaded registry rules to $TMPDIR/semgrep-*.rules (~18MB each)
+            # and never removes them — point TMPDIR at a dir we clean up. Kept separate from
+            # tmp_dir so Semgrep doesn't scan its own rule files.
             try:
-                result = subprocess.run(
-                    cmd, cwd=tmp_dir, capture_output=True, timeout=120, text=True
-                )
+                with tempfile.TemporaryDirectory() as semgrep_tmp:
+                    result = subprocess.run(
+                        cmd, cwd=tmp_dir, capture_output=True, timeout=120, text=True,
+                        env={**os.environ, "TMPDIR": semgrep_tmp},
+                    )
             except subprocess.TimeoutExpired:
                 logger.error("Semgrep timed out after 120s")
                 self._metrics.inc_semgrep_error("timeout")

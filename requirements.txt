@@ -2,7 +2,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 celery[redis]==5.4.0
 redis==5.0.8
-anthropic>=0.26.0
+anthropic>=2.3.0  # beta.messages fallbacks
 openai>=1.0.0
 httpx==0.27.2
 pydantic-settings==2.4.0

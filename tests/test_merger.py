@@ -47,3 +47,20 @@ def test_filter_ignore_paths():
     files = [f.file for f in result]
     assert "migrations/001.java" not in files
     assert "src/Main.java" in files
+
+
+def test_dedup_same_line_keeps_higher_severity():
+    suggest = _f(Severity.SUGGEST, "Foo.java", 10, "ai")
+    critical = _f(Severity.CRITICAL, "Foo.java", 10, "ai")
+    critical.message = "Different wording of the same problem"
+    result = merge_findings([], [suggest, critical])
+    assert len(result) == 1
+    assert result[0].severity == Severity.CRITICAL
+
+
+def test_dedup_matches_across_sources_regardless_of_message():
+    semgrep = _f(Severity.BUG, "Foo.java", 10, "semgrep")
+    ai = _f(Severity.BUG, "Foo.java", 10, "ai")
+    ai.message = "AI wording"
+    result = merge_findings([semgrep], [ai])
+    assert [f.source for f in result] == ["semgrep"]

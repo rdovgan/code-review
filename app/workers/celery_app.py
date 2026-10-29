@@ -2,6 +2,8 @@ import logging
 import time
 from dataclasses import asdict
 
+import httpx
+import redis
 from celery import Celery
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_failure, task_retry, task_revoked
@@ -15,6 +17,7 @@ from app.config.settings import get_settings
 from app.metrics import Metrics
 from app.models import PRContext, Severity
 from app.notifiers import mattermost
+from app.utils.diff_parser import prepare_diff, split_diff_by_file
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +25,48 @@ settings = get_settings()
 metrics = Metrics(settings.REDIS_URL, ai_daily_token_budget=settings.AI_DAILY_TOKEN_BUDGET)
 
 
+# Webhook dedup lock (set in main._queue_review). Collapses bursts of webhooks for the
+# same PR; released when the review finishes so a follow-up push gets reviewed right away.
+REVIEW_LOCK_TTL_SECONDS = 300
+
+
+def review_lock_key(repo_full_name: str, pr_id) -> str:
+    return f"review_lock:{repo_full_name}:{pr_id}"
+
+
+def _release_review_lock(task_payload: dict) -> None:
+    try:
+        r = redis.from_url(settings.REDIS_URL)
+        r.delete(review_lock_key(task_payload.get("repo_full_name", ""), task_payload.get("pr_id", "")))
+    except Exception as exc:
+        logger.warning("Failed to release review lock: %s", exc)
+
+
+def _mark_review_aborted(task_payload: dict, description: str) -> None:
+    """Best-effort: replace the "in progress" build status of a task that died."""
+    try:
+        payload = dict(task_payload)
+        platform = payload.pop("platform")
+        payload.pop("diff", None)
+        pr_context = PRContext(platform=platform, diff="", **payload)
+        workspace, repo_slug = pr_context.repo_full_name.split("/", 1)
+        get_adapter(platform, workspace, repo_slug, settings).set_review_status(pr_context, "stopped", description)
+    except Exception as exc:
+        logger.warning("Failed to set build status of an aborted review: %s", exc)
+
+
+def _task_payload_from(args) -> dict | None:
+    return args[0] if args and isinstance(args[0], dict) else None
+
+
 @task_failure.connect(sender="app.workers.celery_app.process_review")
-def on_task_failure(sender, task_id, exception, **kwargs):
+def on_task_failure(sender, task_id, exception, args=None, **kwargs):
     logger.error("Task %s failed with unhandled exception: %s", task_id, exception)
     metrics.inc_webhook(status="error")
+    task_payload = _task_payload_from(args)
+    if task_payload:
+        _mark_review_aborted(task_payload, f"Review failed: {type(exception).__name__}")
+        _release_review_lock(task_payload)
 
 
 @task_revoked.connect(sender="app.workers.celery_app.process_review")
@@ -33,6 +74,10 @@ def on_task_revoked(sender, request, terminated, signum, expired, **kwargs):
     reason = "timeout" if expired or signum else "revoked"
     logger.error("Task %s %s (signal=%s)", request.id, reason, signum)
     metrics.inc_webhook(status="error")
+    task_payload = _task_payload_from(getattr(request, "args", None))
+    if task_payload:
+        _mark_review_aborted(task_payload, f"Review {reason}")
+        _release_review_lock(task_payload)
 
 
 @task_retry.connect(sender="app.workers.celery_app.process_review")
@@ -90,7 +135,7 @@ def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str,
         return
     if pr_context.author not in config.notify_authors:
         return
-    status_emoji = "❌" if final_state == "failure" else "✅"
+    status_emoji = {"failure": "❌", "stopped": "⚠️"}.get(final_state, "✅")
     repo_name = pr_context.repo_full_name.split("/")[-1]
     pr_url = _pr_url(pr_context)
     if pr_context.source_branch:
@@ -130,7 +175,7 @@ def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str,
         lines.append(f"[View review comment →]({pr_url}#comment-{summary_comment_id})")
 
     attachment = {
-        "color": _MM_COLOR_FAIL if final_state == "failure" else _MM_COLOR_PASS,
+        "color": _MM_COLOR_PASS if final_state == "success" else _MM_COLOR_FAIL,
         "fallback": f"{status_emoji} {repo_name} / {pr_context.title}",
         "text": "\n".join(lines),
     }
@@ -155,8 +200,48 @@ def _build_summary(findings, critical_count, bug_count, perf_count, suggest_coun
     return "\n".join(lines)
 
 
-@celery_app.task(bind=True, max_retries=2, autoretry_for=(ConnectionError, TimeoutError), retry_backoff=True)
+_AI_STOP_REASONS = {
+    "budget": "daily AI token budget exhausted",
+    "deadline": "task time limit reached",
+    "chunk_cap": "diff split into too many chunks",
+    "parse_failures": "AI responses could not be parsed",
+    "errors": "AI requests failed",
+}
+_MAX_LISTED_FILES = 10
+
+
+def _file_list(paths: list[str]) -> str:
+    listed = ", ".join(f"`{p}`" for p in paths[:_MAX_LISTED_FILES])
+    if len(paths) > _MAX_LISTED_FILES:
+        listed += f" and {len(paths) - _MAX_LISTED_FILES} more"
+    return listed
+
+
+def _fetch_file_contents(adapter, pr_context: PRContext, paths: list[str]) -> dict[str, str | None]:
+    """New-version content of each file (None if missing), shared by Semgrep and the AI context."""
+    contents: dict[str, str | None] = {}
+    for i, path in enumerate(paths):
+        if i > 0:
+            time.sleep(0.3)  # avoid Bitbucket rate limiting on bulk file fetches
+        try:
+            contents[path] = adapter.get_file_content(pr_context, path, pr_context.head_sha)
+        except Exception as exc:
+            logger.warning("Failed to fetch %s for review context: %s", path, exc)
+            contents[path] = None
+    return contents
+
+
+# httpx errors are not builtin ConnectionError/TimeoutError subclasses — list them explicitly
+@celery_app.task(bind=True, max_retries=2, retry_backoff=True,
+                 autoretry_for=(ConnectionError, TimeoutError, httpx.TransportError))
 def process_review(self, task_payload: dict) -> dict:
+    try:
+        return _run_review(self, task_payload)
+    finally:
+        _release_review_lock(task_payload)
+
+
+def _run_review(self, task_payload: dict) -> dict:
     payload = dict(task_payload)  # copy — pop() would corrupt dict on retry
     platform = payload.pop("platform")
     diff = payload.pop("diff", "")
@@ -186,23 +271,45 @@ def process_review(self, task_payload: dict) -> dict:
     review_start = time.monotonic()
     logger.info("%s Review started — %d files, language: %s", pr_tag, len(pr_context.changed_files), pr_context.language)
 
-    diff_lines = len(pr_context.diff.splitlines())
-    truncated = diff_lines > config.max_diff_lines
-    if truncated:
-        pr_context.diff = "\n".join(pr_context.diff.splitlines()[:config.max_diff_lines])
-        logger.info("%s Diff truncated to %d lines (original: %d)", pr_tag, config.max_diff_lines, diff_lines)
+    # Ignored/deleted/binary files are dropped before the line limit is applied, and the
+    # limit cuts at file/hunk boundaries — see prepare_diff()
+    prepared = prepare_diff(pr_context.diff, config.ignore_paths, config.max_diff_lines)
+    pr_context.diff = prepared.diff
+    if prepared.ignored_files:
+        logger.info("%s Excluded %d ignored/deleted/binary file(s) from review", pr_tag, len(prepared.ignored_files))
+    if prepared.truncated:
+        logger.info(
+            "%s Diff truncated to %d/%d lines — %d file(s) skipped, %d partial",
+            pr_tag, prepared.reviewed_lines, prepared.original_lines,
+            len(prepared.skipped_files), len(prepared.partial_files),
+        )
+
+    if not pr_context.diff.strip():
+        logger.info("%s Nothing to review — every changed file is ignored, deleted or binary", pr_tag)
+        adapter.set_review_status(pr_context, "success", "No reviewable changes")
+        metrics.record_review(status="skipped", duration_ms=0, critical=0, bugs=0, perf=0, suggestions=0, semgrep_count=0, ai_count=0,
+                              language=pr_context.language, project=pr_context.repo_full_name, author=pr_context.author)
+        return {"status": "skipped", "reason": "no_reviewable_changes"}
 
     adapter.set_review_status(pr_context, "pending", "Code review in progress...")
+
+    # Fetched once: Semgrep scans these files, the AI gets them as context around the diff
+    file_contents: dict[str, str | None] = {}
+    if config.static_analysis or (config.ai_review and settings.AI_FILE_CONTEXT_MAX_CHARS > 0):
+        review_files = [fd.path for fd in split_diff_by_file(pr_context.diff)]
+        file_contents = _fetch_file_contents(adapter, pr_context, review_files)
 
     semgrep_results = []
     ai_results = []
     ai_reviewer = None
+    ai_incomplete_reason = None  # set when the AI review did not cover the whole diff
+    ai_reviewed_nothing = False  # ...and when it covered none of it
 
     try:
         if config.static_analysis:
             logger.info("%s Step 1/2: Static analysis started", pr_tag)
             try:
-                semgrep_results = SemgrepRunner(config).run(pr_context, adapter)
+                semgrep_results = SemgrepRunner(config).run(pr_context, adapter, file_contents=file_contents)
                 logger.info("%s Step 1/2: Static analysis complete — %d finding(s)", pr_tag, len(semgrep_results))
             except Exception as exc:
                 logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
@@ -234,10 +341,20 @@ def process_review(self, task_payload: dict) -> dict:
                 timelimit = getattr(self.request, "timelimit", None)
                 if timelimit and len(timelimit) == 2 and timelimit[1]:
                     deadline = time.monotonic() + timelimit[1]
-                ai_results = ai_reviewer.review(pr_context, config, deadline=deadline)
+                ai_results = ai_reviewer.review(pr_context, config, deadline=deadline, file_contents=file_contents)
+                stop_reason = getattr(ai_results, "stop_reason", None)
+                if stop_reason:
+                    ai_incomplete_reason = _AI_STOP_REASONS.get(stop_reason, stop_reason)
+                    ai_reviewed_nothing = getattr(ai_results, "chunks_reviewed", 0) == 0
+                    logger.warning(
+                        "%s Step 2/2: AI review incomplete (%s) — %d/%d chunk(s) reviewed",
+                        pr_tag, ai_incomplete_reason, ai_results.chunks_reviewed, ai_results.chunks_total,
+                    )
                 logger.info("%s Step 2/2: AI review complete — %d finding(s)", pr_tag, len(ai_results))
             except Exception as exc:
                 logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)
+                ai_incomplete_reason = f"AI review failed: {type(exc).__name__}"
+                ai_reviewed_nothing = True
         else:
             logger.info("%s Step 2/2: AI review skipped — disabled in config", pr_tag)
 
@@ -286,19 +403,38 @@ def process_review(self, task_payload: dict) -> dict:
     perf_count = sum(1 for f in findings if f.severity == Severity.PERFORMANCE)
     suggest_count = sum(1 for f in findings if f.severity == Severity.SUGGEST)
 
+    notes = []
+    if prepared.truncated:
+        note = (f"> ⚠️ PR diff has {prepared.original_lines} lines; {prepared.reviewed_lines} were analyzed "
+                f"(limit {config.max_diff_lines}, ignored files excluded).")
+        if prepared.skipped_files:
+            note += f"  \n> Not reviewed: {_file_list(prepared.skipped_files)}."
+        if prepared.partial_files:
+            note += f"  \n> Partially reviewed: {_file_list(prepared.partial_files)}."
+        notes.append(note)
+    if ai_incomplete_reason:
+        scope = "did not run" if ai_reviewed_nothing else "covered only part of the diff"
+        notes.append(f"> ⚠️ AI review {scope}: {ai_incomplete_reason}.")
+
     summary_comment_id = ""
-    if findings or truncated:
+    if findings or notes:
         summary = _build_summary(findings, critical_count, bug_count, perf_count, suggest_count)
-        if truncated:
-            summary += f"\n\n> ⚠️ PR has {diff_lines} lines. Analysis was performed on the first {config.max_diff_lines} lines."
+        if notes:
+            summary += "\n\n" + "\n\n".join(notes)
         try:
             summary_comment_id = adapter.post_summary_comment(pr_context, summary) or ""
             logger.info("%s Summary comment posted — %d inline comment(s)", pr_tag, inline_count)
         except Exception as exc:
             logger.warning("%s Failed to post summary comment: %s", pr_tag, exc)
 
-    final_state = "failure" if any(f.severity.value in config.block_merge_on for f in findings) else "success"
-    adapter.set_review_status(pr_context, final_state, f"{len(findings)} issues found")
+    if any(f.severity.value in config.block_merge_on for f in findings):
+        final_state, status_description = "failure", f"{len(findings)} issues found"
+    elif ai_reviewed_nothing:
+        # The AI review is the main check — a green status without it would be misleading
+        final_state, status_description = "stopped", f"Not reviewed: {ai_incomplete_reason}"
+    else:
+        final_state, status_description = "success", f"{len(findings)} issues found"
+    adapter.set_review_status(pr_context, final_state, status_description)
 
     try:
         _notify_mattermost(adapter, pr_context, config, final_state, critical_count, bug_count, summary_comment_id)

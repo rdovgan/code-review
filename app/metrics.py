@@ -85,7 +85,7 @@ class Metrics:
         project: str = "unknown",
         author: str = "unknown",
     ) -> None:
-        """status: success | failure | skipped"""
+        """status: success | failure | stopped | skipped"""
         total_findings = critical + bugs + perf + suggestions
         try:
             pipe = self._r.pipeline()

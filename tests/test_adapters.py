@@ -70,3 +70,39 @@ def test_bitbucket_parse_ignored_event():
     payload = {"event": "repo:push", "repository": {"full_name": "workspace/repo"}}
     ctx = adapter.parse_webhook(payload)
     assert ctx is None
+
+
+def test_bitbucket_author_is_pr_author_not_actor():
+    adapter = _make_adapter()
+    payload = json.loads((FIXTURES / "bitbucket_payload.json").read_text())
+    payload["actor"] = {"display_name": "Someone Who Commented"}
+    payload["pullrequest"]["author"] = {"display_name": "Jane Developer"}
+    ctx = adapter.parse_webhook(payload)
+    assert ctx.author == "Jane Developer"
+
+
+def test_bitbucket_list_endpoints_follow_pagination():
+    from unittest.mock import MagicMock
+
+    from app.models import PRContext
+
+    adapter = _make_adapter()
+    page1 = MagicMock()
+    page1.json.return_value = {
+        "values": [{"id": 1, "content": {"raw": "## AI Code Review Summary"}}],
+        "next": "https://api.bitbucket.org/2.0/next-page",
+    }
+    page2 = MagicMock()
+    page2.json.return_value = {"values": [{"id": 2, "content": {"raw": "**[BUG]** old"}}]}
+    adapter._client = MagicMock()
+    adapter._client.get.side_effect = [page1, page2]
+
+    ctx = PRContext(platform="bitbucket", repo_full_name="ws/repo", pr_id=7, base_sha="b", head_sha="h",
+                    author="a", title="t", language="java", diff="")
+    comments = adapter.get_existing_bot_comments(ctx)
+
+    assert [c["id"] for c in comments] == ["1", "2"]
+    first, second = adapter._client.get.call_args_list
+    assert first.kwargs["params"] == {"pagelen": 100}
+    assert second.args[0] == "https://api.bitbucket.org/2.0/next-page"
+    assert second.kwargs["params"] is None

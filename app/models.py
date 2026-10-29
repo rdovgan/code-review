@@ -30,7 +30,9 @@ class Finding:
 
     @property
     def dedup_key(self) -> str:
-        raw = f"{self.file}:{self.line}:{self.message[:50]}"
+        # Location only: Semgrep and AI word the same problem differently, so including
+        # the message made cross-source dedup almost never match.
+        raw = f"{self.file}:{self.line}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 

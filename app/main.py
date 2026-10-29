@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from app.adapters.factory import get_adapter
 from app.config.settings import get_settings
 from app.metrics import Metrics
-from app.workers.celery_app import (process_review, _BASE_SOFT_TIME_LIMIT, _BASE_TIME_LIMIT,
+from app.workers.celery_app import (process_review, review_lock_key, REVIEW_LOCK_TTL_SECONDS,
+                                    _BASE_SOFT_TIME_LIMIT, _BASE_TIME_LIMIT,
                                     _EXTRA_SECONDS_PER_FILE, _MAX_FILE_COUNT_FOR_LIMITS)
 
 structlog.configure(
@@ -100,10 +101,11 @@ def _extract_repo_info(payload: dict, platform: str) -> tuple[str, str]:
 
 async def _queue_review(pr_context, platform: str, adapter) -> JSONResponse:
     """Deduplicate and queue a review task with dynamic time limits."""
-    dedup_key = f"review_lock:{pr_context.repo_full_name}:{pr_context.pr_id}"
+    dedup_key = review_lock_key(pr_context.repo_full_name, pr_context.pr_id)
     try:
         r = aioredis.from_url(settings.REDIS_URL)
-        acquired = await r.set(dedup_key, "1", nx=True, ex=1800)  # match global hard time limit
+        # Collapses webhook bursts; the worker releases it as soon as the review ends
+        acquired = await r.set(dedup_key, "1", nx=True, ex=REVIEW_LOCK_TTL_SECONDS)
         await r.aclose()
     except Exception as exc:
         logger.warning("redis_lock_failed", error=str(exc))

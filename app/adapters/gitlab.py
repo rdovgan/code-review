@@ -168,7 +168,7 @@ class GitlabAdapter(GitPlatform):
         return comments
 
     def set_review_status(self, pr_context: PRContext, state: str, description: str) -> bool:
-        state_map = {"pending": "pending", "success": "success", "failure": "failed"}
+        state_map = {"pending": "pending", "success": "success", "failure": "failed", "stopped": "canceled"}
         gl_state = state_map.get(state, "pending")
         project = self._encode_project(pr_context.repo_full_name)
         url = f"{self._base_url}/projects/{project}/statuses/{pr_context.head_sha}"

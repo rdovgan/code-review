@@ -109,3 +109,60 @@ index 1234567..0000000
     result = parse_diff_for_changed_lines(diff)
     # No added lines in deleted file
     assert result == {"deleted.txt": set()}
+
+
+from app.utils.diff_parser import is_ignored, prepare_diff, split_diff_by_file
+
+
+def _file_diff(path: str, added: int, hunks: int = 1) -> str:
+    out = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+    for h in range(hunks):
+        out += f"@@ -{h * 100 + 1},0 +{h * 100 + 1},{added} @@\n" + "".join(f"+line {i}\n" for i in range(added))
+    return out
+
+
+def test_is_ignored_double_star_matches_repo_root():
+    assert is_ignored("app.properties", ["**/*.properties"])
+    assert is_ignored("src/main/app.properties", ["**/*.properties"])
+    assert not is_ignored("src/Main.java", ["**/*.properties"])
+
+
+def test_split_diff_detects_deleted_and_binary_files():
+    diff = (
+        "diff --git a/Gone.java b/Gone.java\ndeleted file mode 100644\n--- a/Gone.java\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-class Gone {}\n"
+        "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n"
+        + _file_diff("Main.java", 2)
+    )
+    files = {f.path: f for f in split_diff_by_file(diff)}
+    assert files["Gone.java"].deleted
+    assert files["logo.png"].binary
+    assert not files["Main.java"].deleted and not files["Main.java"].binary
+
+
+def test_prepare_diff_drops_ignored_files_before_applying_the_limit():
+    # The ignored file comes first and alone exceeds the limit — it must not eat the budget
+    diff = _file_diff("data/big.csv", 50) + _file_diff("src/Main.java", 5)
+    prepared = prepare_diff(diff, ["**/*.csv"], max_lines=20)
+    assert prepared.files == ["src/Main.java"]
+    assert prepared.ignored_files == ["data/big.csv"]
+    assert not prepared.truncated
+    assert "big.csv" not in prepared.diff
+
+
+def test_prepare_diff_cuts_at_file_and_hunk_boundaries():
+    diff = _file_diff("A.java", 5) + _file_diff("Big.java", 10, hunks=3) + _file_diff("Huge.java", 100) + _file_diff("C.java", 3)
+    prepared = prepare_diff(diff, [], max_lines=42)
+    assert prepared.files == ["A.java", "Big.java", "C.java"]
+    assert prepared.partial_files == ["Big.java"]
+    assert prepared.skipped_files == ["Huge.java"]
+    assert prepared.reviewed_lines <= 42
+    # every hunk kept is complete
+    assert prepared.diff.count("+line 9\n") == 2  # Big.java: 2 of 3 hunks fit
+    assert prepared.truncated
+
+
+def test_prepare_diff_non_git_text_falls_back_to_line_cut():
+    prepared = prepare_diff("\n".join(f"line {i}" for i in range(10)), [], max_lines=4)
+    assert prepared.diff.splitlines() == ["line 0", "line 1", "line 2", "line 3"]
+    assert prepared.truncated

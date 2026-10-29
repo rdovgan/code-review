@@ -1,0 +1,50 @@
+# Fires while today's AI token usage is at or above AI_DAILY_TOKEN_BUDGET.
+# While it fires, AI review is skipped and PRs get the "stopped" build status.
+# Delivery goes to the default notification policy — pick the contact point in
+# Grafana → Alerting → Contact points (a Mattermost/Slack webhook, email, ...).
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: code-review-bot
+    folder: Code Review Bot
+    interval: 1m
+    rules:
+      - uid: code-review-ai-budget-exhausted
+        title: AI daily token budget exhausted
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093  # provisioned "Prometheus" datasource (same uid the dashboards use)
+            model:
+              refId: A
+              expr: code_review_ai_tokens_today / (code_review_ai_token_budget > 0)
+              instant: true
+              intervalMs: 60000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 0.999
+        noDataState: OK      # budget = 0 (unlimited) yields no series
+        execErrState: Error
+        for: 0m
+        labels:
+          severity: warning
+          service: code-review-bot
+        annotations:
+          summary: Code review bot hit its daily AI token budget
+          description: >-
+            {{ humanizePercentage $values.A.Value }} of the daily budget is used — AI review is skipped
+            until midnight (server time) and PRs get the "stopped" build status.
+            Raise AI_DAILY_TOKEN_BUDGET in .env and restart the worker to resume.

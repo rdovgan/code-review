@@ -40,7 +40,7 @@ app/
 ├── analyzers/
 │   ├── semgrep_runner.py     # Semgrep subprocess wrapper
 │   ├── ai_reviewer.py        # Anthropic SDK, prompt loading, JSON parsing
-│   └── merger.py             # dedup (sha256 key) + severity sort
+│   └── merger.py             # dedup (file:line key) + severity sort
 ├── workers/
 │   └── celery_app.py         # process_review task, ThreadPoolExecutor
 └── config/
@@ -105,7 +105,11 @@ docker compose up --build
 
 | Decision | Rationale |
 |---|---|
-| `Finding.dedup_key` via sha256 | Single dedup mechanism; Semgrep findings win ties (inserted first) |
+| `Finding.dedup_key` = sha256 of `file:line` | One finding per line across sources (messages differ between Semgrep and AI); higher severity wins, Semgrep wins ties |
+| `prepare_diff()` before analysis | Ignored/deleted/binary files are dropped first, then `max_diff_lines` cuts at file/hunk boundaries; skipped files are listed in the summary |
+| Changed files fetched once per review | Same contents feed Semgrep and the AI's line-numbered file context (`AI_FILE_CONTEXT_MAX_CHARS`) |
+| `stopped` build status when AI reviewed nothing | Budget/API failure must not look like a clean review; partial AI coverage keeps the normal status with a note |
+| Review lock: 5 min TTL, released by the worker | Collapses webhook bursts without blocking re-review of a follow-up push |
 | Prompt files as `.md`, not hardcoded | Prompt tuning without code deploys or restarts |
 | `ThreadPoolExecutor` in Celery | Semgrep is subprocess, Anthropic SDK is sync — asyncio adds complexity with no benefit |
 | `task_acks_late=True` | Message stays in queue until task completes — prevents data loss on worker crash |
@@ -129,5 +133,5 @@ docker compose up --build
 ### Phase 4
 - [ ] Web UI for review history
 - [ ] Per-author statistics
-- [ ] Rate limiting + AI API budget alerts
+- [ ] Rate limiting (AI budget alert: `grafana/provisioning/alerting/ai_budget.yml`)
 - [ ] Multi-tenant support

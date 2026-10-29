@@ -27,6 +27,27 @@ class BitbucketAdapter(GitPlatform):
                 follow_redirects=True,
             )
 
+    # Bitbucket list endpoints return 10 items per page by default; 100 is the API maximum
+    # for comments/commits and well within the diffstat limit.
+    _PAGELEN = 100
+    _MAX_PAGES = 50
+
+    def _get_paginated(self, url: str) -> list[dict]:
+        """GET every page of a Bitbucket list endpoint (follows the "next" link)."""
+        values: list[dict] = []
+        params: Optional[dict] = {"pagelen": self._PAGELEN}
+        for _ in range(self._MAX_PAGES):
+            resp = self._client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            values.extend(data.get("values", []))
+            url = data.get("next")
+            if not url:
+                return values
+            params = None  # the "next" URL already carries pagelen and the page cursor
+        logger.warning("Stopped paginating %s after %d pages", url, self._MAX_PAGES)
+        return values
+
     def validate_webhook(self, body: bytes, headers: dict) -> bool:
         sig_header = headers.get("x-hub-signature", "")
         if not sig_header.startswith("sha256="):
@@ -68,7 +89,9 @@ class BitbucketAdapter(GitPlatform):
         head_sha = pr.get("source", {}).get("commit", {}).get("hash", "")
         target_branch = pr.get("destination", {}).get("branch", {}).get("name", "main")
         source_branch = pr.get("source", {}).get("branch", {}).get("name", "")
-        author = actor.get("display_name", actor.get("nickname", "unknown"))
+        # The PR author, not the actor: on updates/"review" comments the actor is whoever pushed or commented
+        pr_author = pr.get("author") or actor
+        author = pr_author.get("display_name", pr_author.get("nickname", "unknown"))
         title = pr.get("title", "")
         pr_id = pr.get("id", 0)
         # pullrequest:created has no "changes" key and no "comment" key
@@ -100,11 +123,8 @@ class BitbucketAdapter(GitPlatform):
     def get_changed_files(self, pr_context: PRContext) -> list[str]:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/diffstat"
-        resp = self._client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
         files = []
-        for entry in data.get("values", []):
+        for entry in self._get_paginated(url):
             new_path = entry.get("new", {})
             if new_path and new_path.get("path"):
                 files.append(new_path["path"])
@@ -113,11 +133,9 @@ class BitbucketAdapter(GitPlatform):
     def get_pr_commits(self, pr_context: PRContext) -> list[str]:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/commits"
-        resp = self._client.get(url)
-        resp.raise_for_status()
         return [
             c.get("message", "").strip().splitlines()[0]
-            for c in resp.json().get("values", [])
+            for c in self._get_paginated(url)
             if c.get("message", "").strip()
         ]
 
@@ -161,17 +179,15 @@ class BitbucketAdapter(GitPlatform):
     def get_existing_bot_comments(self, pr_context: PRContext) -> list[dict]:
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/pullrequests/{pr_context.pr_id}/comments"
-        resp = self._client.get(url)
-        resp.raise_for_status()
         comments = []
-        for c in resp.json().get("values", []):
+        for c in self._get_paginated(url):
             raw = c.get("content", {}).get("raw", "")
             if "## AI Code Review Summary" in raw or raw.startswith("**[CRITICAL]**") or raw.startswith("**[BUG]**") or raw.startswith("**[PERFORMANCE]**") or raw.startswith("**[SUGGEST]**"):
                 comments.append({"id": str(c.get("id", "")), "body": raw})
         return comments
 
     def set_review_status(self, pr_context: PRContext, state: str, description: str) -> bool:
-        state_map = {"pending": "INPROGRESS", "success": "SUCCESSFUL", "failure": "FAILED"}
+        state_map = {"pending": "INPROGRESS", "success": "SUCCESSFUL", "failure": "FAILED", "stopped": "STOPPED"}
         bb_state = state_map.get(state, "INPROGRESS")
         workspace, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{BITBUCKET_API}/2.0/repositories/{workspace}/{repo}/commit/{pr_context.head_sha}/statuses/build"

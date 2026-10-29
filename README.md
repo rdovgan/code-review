@@ -221,7 +221,7 @@ If nothing appears after 30 seconds: `docker compose logs --tail=50 worker`
 | `static_analysis` | bool | `true` | Run Semgrep |
 | `semgrep_ai_verify` | bool | `true` | Re-check each Semgrep finding with AI and drop ones judged to be false positives before posting (fails open — keeps findings unfiltered if verification errors out) |
 | `block_merge_on` | list | `[CRITICAL]` | Severity levels that set build status to FAILED |
-| `max_diff_lines` | int | `500` | Skip review if diff exceeds this line count |
+| `max_diff_lines` | int | `500` | Max diff lines analyzed (ignored files excluded first); the rest is cut at file/hunk boundaries and listed in the summary |
 | `ignore_paths` | list | `[]` | Glob patterns — matching files produce no findings |
 | `semgrep_rules` | list | `[owasp, security-audit]` | Rule packs: `owasp`, `security-audit`, `p/java`, `p/csharp`, `p/php`, `p/javascript`, `p/python`, `p/django`, `p/flask` |
 | `ai_focus` | list | `[security, bugs]` | Hints passed to the AI prompt |
@@ -370,9 +370,11 @@ nano .env
 
 ```env
 ANTHROPIC_API_KEY=sk-ant-...
-AI_MODEL=claude-sonnet-4-6
-AI_MAX_TOKENS=4096
+AI_MODEL=claude-sonnet-5-5
+AI_MAX_TOKENS=16000
 AI_MAX_DIFF_TOKENS=8000
+AI_FILE_CONTEXT_MAX_CHARS=120000
+AI_DAILY_TOKEN_BUDGET=10000000
 
 REDIS_URL=redis://redis:6379/0
 

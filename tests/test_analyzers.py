@@ -53,12 +53,12 @@ def test_ai_reviewer_parses_valid_json():
     settings = _make_settings()
     reviewer = _make_reviewer(settings)
     mock_response = MagicMock()
-    mock_response.content = [MagicMock(text=json.dumps([
+    mock_response.content = [MagicMock(type="text", text=json.dumps([
         {"severity": "CRITICAL", "file": "Foo.java", "line": 10,
          "message": "SQL injection", "suggestion": "Use prepared statements"}
     ]))]
     mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
-    with patch.object(reviewer._client.messages, "create", return_value=mock_response):
+    with patch.object(reviewer._client.beta.messages, "create", return_value=mock_response):
         findings = reviewer.review(_make_pr_context(), ReviewConfig())
     assert len(findings) == 1
     assert findings[0].severity == Severity.CRITICAL
@@ -70,9 +70,9 @@ def test_ai_reviewer_handles_malformed_json():
     settings = _make_settings()
     reviewer = _make_reviewer(settings)
     mock_response = MagicMock()
-    mock_response.content = [MagicMock(text="This is not JSON at all!!!")]
+    mock_response.content = [MagicMock(type="text", text="This is not JSON at all!!!")]
     mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
-    with patch.object(reviewer._client.messages, "create", return_value=mock_response):
+    with patch.object(reviewer._client.beta.messages, "create", return_value=mock_response):
         findings = reviewer.review(_make_pr_context(), ReviewConfig())
     assert findings == []
 
@@ -82,9 +82,9 @@ def test_ai_reviewer_strips_markdown_fences():
     reviewer = _make_reviewer(settings)
     fenced = '```json\n[{"severity": "BUG", "file": "Bar.java", "line": 5, "message": "NPE risk", "suggestion": "Add null check"}]\n```'
     mock_response = MagicMock()
-    mock_response.content = [MagicMock(text=fenced)]
+    mock_response.content = [MagicMock(type="text", text=fenced)]
     mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
-    with patch.object(reviewer._client.messages, "create", return_value=mock_response):
+    with patch.object(reviewer._client.beta.messages, "create", return_value=mock_response):
         findings = reviewer.review(_make_pr_context(), ReviewConfig())
     assert len(findings) == 1
     assert findings[0].severity == Severity.BUG
@@ -106,7 +106,7 @@ def _make_semgrep_finding(file: str = "Foo.java", line: int = 1, message: str = 
 def test_verify_semgrep_findings_empty_list_skips_ai_call():
     settings = _make_settings()
     reviewer = _make_reviewer(settings)
-    with patch.object(reviewer._client.messages, "create") as mock_create:
+    with patch.object(reviewer._client.beta.messages, "create") as mock_create:
         result = reviewer.verify_semgrep_findings([], _make_pr_context())
     mock_create.assert_not_called()
     assert result == []
@@ -117,12 +117,12 @@ def test_verify_semgrep_findings_filters_false_positives():
     reviewer = _make_reviewer(settings)
     findings = [_make_semgrep_finding(line=1, message="Real bug"), _make_semgrep_finding(line=2, message="Noise")]
     mock_response = MagicMock()
-    mock_response.content = [MagicMock(text=json.dumps([
+    mock_response.content = [MagicMock(type="text", text=json.dumps([
         {"index": 0, "verdict": "CONFIRMED", "reason": "genuinely unsafe"},
         {"index": 1, "verdict": "FALSE_POSITIVE", "reason": "input already sanitized above"},
     ]))]
     mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
-    with patch.object(reviewer._client.messages, "create", return_value=mock_response):
+    with patch.object(reviewer._client.beta.messages, "create", return_value=mock_response):
         result = reviewer.verify_semgrep_findings(findings, _make_pr_context())
     assert len(result) == 1
     assert result[0].message == "Real bug"
@@ -132,7 +132,7 @@ def test_verify_semgrep_findings_fails_open_on_ai_error():
     settings = _make_settings()
     reviewer = _make_reviewer(settings)
     findings = [_make_semgrep_finding()]
-    with patch.object(reviewer._client.messages, "create", side_effect=RuntimeError("boom")):
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=RuntimeError("boom")):
         result = reviewer.verify_semgrep_findings(findings, _make_pr_context())
     assert result == findings
 
@@ -142,9 +142,9 @@ def test_verify_semgrep_findings_fails_open_on_unparseable_response():
     reviewer = _make_reviewer(settings)
     findings = [_make_semgrep_finding()]
     mock_response = MagicMock()
-    mock_response.content = [MagicMock(text="not json")]
+    mock_response.content = [MagicMock(type="text", text="not json")]
     mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
-    with patch.object(reviewer._client.messages, "create", return_value=mock_response):
+    with patch.object(reviewer._client.beta.messages, "create", return_value=mock_response):
         result = reviewer.verify_semgrep_findings(findings, _make_pr_context())
     assert result == findings
 
@@ -162,7 +162,10 @@ def test_semgrep_runner_filters_ignore_paths():
         author="dev",
         title="Test",
         language="java",
-        diff="",
+        diff="".join(
+            f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -0,0 +1 @@\n+class X {{}}\n"
+            for p in ("migrations/001.java", "src/Main.java", "Auto.generated.java")
+        ),
         changed_files=["migrations/001.java", "src/Main.java", "Auto.generated.java"],
     )
     # Patch subprocess to avoid running real semgrep
@@ -251,7 +254,7 @@ def test_ai_review_stops_at_deadline_returns_partial_findings():
     reviewer._settings.AI_DAILY_TOKEN_BUDGET = 0  # disable budget check
 
     good_response = MagicMock()
-    good_response.content = [MagicMock(text=json.dumps([
+    good_response.content = [MagicMock(type="text", text=json.dumps([
         {"severity": "BUG", "file": "Foo.java", "line": 1, "message": "bug", "suggestion": "fix"}
     ]))]
     good_response.usage = MagicMock(input_tokens=10, output_tokens=5)
@@ -272,7 +275,7 @@ def test_ai_review_stops_at_deadline_returns_partial_findings():
         clock["now"] += 300.0
         return good_response
 
-    with patch.object(reviewer._client.messages, "create", side_effect=fake_create), \
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=fake_create), \
          patch("app.analyzers.ai_reviewer.time.monotonic", side_effect=lambda: clock["now"]):
         # Reserve is 60s (stop if now > 1500-60=1440): chunks at clock 1000 and
         # 1300 run, the third iteration (clock 1600) crosses and breaks
@@ -288,7 +291,7 @@ def test_ai_review_no_deadline_processes_all_chunks():
     reviewer._settings.AI_DAILY_TOKEN_BUDGET = 0
 
     empty_response = MagicMock()
-    empty_response.content = [MagicMock(text=json.dumps([
+    empty_response.content = [MagicMock(type="text", text=json.dumps([
         {"severity": "BUG", "file": "Foo.java", "line": 1, "message": "bug", "suggestion": "fix"}
     ]))]
     empty_response.usage = MagicMock(input_tokens=10, output_tokens=5)
@@ -300,8 +303,103 @@ def test_ai_review_no_deadline_processes_all_chunks():
     )
     ctx = _make_pr_context(diff=diff)
 
-    with patch.object(reviewer._client.messages, "create", return_value=empty_response) as mock_create:
+    with patch.object(reviewer._client.beta.messages, "create", return_value=empty_response) as mock_create:
         findings = reviewer.review(ctx, ReviewConfig(), deadline=None)
 
     assert mock_create.call_count == 4  # one chunk per file
     assert len(findings) == 4
+
+
+def _response(text: str, *blocks) -> MagicMock:
+    resp = MagicMock()
+    resp.content = list(blocks) + [MagicMock(type="text", text=text)]
+    resp.stop_reason = "end_turn"
+    resp.usage = MagicMock(input_tokens=10, output_tokens=5)
+    return resp
+
+
+def _multi_file_diff(n: int, lines_per_file: int = 1500) -> str:
+    return "".join(
+        f"diff --git a/File{i}.java b/File{i}.java\n" + "".join(f"+line {j}\n" for j in range(lines_per_file))
+        for i in range(n)
+    )
+
+
+def test_ai_review_clean_chunks_do_not_trip_circuit_breaker():
+    """[] means "no issues" — it used to count as a parse failure and abort after 2 clean chunks."""
+    reviewer = _make_reviewer(_make_settings())
+    ctx = _make_pr_context(diff=_multi_file_diff(4))
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        result = reviewer.review(ctx, ReviewConfig())
+    assert mock_create.call_count == 4
+    assert result.complete and result.chunks_reviewed == 4
+
+
+def test_ai_review_reports_budget_stop_when_nothing_reviewed():
+    settings = _make_settings()
+    settings.AI_DAILY_TOKEN_BUDGET = 1000
+    reviewer = _make_reviewer(settings)
+    reviewer._redis.get.return_value = 5000
+    with patch.object(reviewer._client.beta.messages, "create") as mock_create:
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    mock_create.assert_not_called()
+    assert result.stop_reason == "budget"
+    assert result.chunks_reviewed == 0
+
+
+def test_ai_review_reports_errors_when_every_chunk_fails():
+    reviewer = _make_reviewer(_make_settings())
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=RuntimeError("boom")):
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    assert result.stop_reason == "errors"
+    assert result.chunks_reviewed == 0
+
+
+def test_ai_review_reads_text_blocks_after_thinking():
+    reviewer = _make_reviewer(_make_settings())
+    thinking = MagicMock(type="thinking", thinking="", text="")
+    answer = json.dumps([{"severity": "BUG", "file": "Foo.java", "line": 3, "message": "m", "suggestion": "s"}])
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response(answer, thinking)):
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    assert [f.line for f in result] == [3]
+
+
+def test_ai_review_refusal_counts_as_failed_chunk():
+    reviewer = _make_reviewer(_make_settings())
+    refused = _response("")
+    refused.stop_reason = "refusal"
+    with patch.object(reviewer._client.beta.messages, "create", return_value=refused):
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    assert result.stop_reason == "errors"
+
+
+def test_ai_review_sends_numbered_file_context_for_changed_files():
+    reviewer = _make_reviewer(_make_settings())
+    diff = "diff --git a/Foo.java b/Foo.java\n--- a/Foo.java\n+++ b/Foo.java\n@@ -1 +1,2 @@\n class Foo {\n+  int x;\n"
+    contents = {"Foo.java": "class Foo {\n  int x;\n}", "Other.java": "class Other {}"}
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(_make_pr_context(diff=diff), ReviewConfig(), file_contents=contents)
+    sent = mock_create.call_args.kwargs["messages"][0]["content"]
+    assert "FULL_FILE_CONTEXT" in sent
+    assert "    2|   int x;" in sent
+    assert "Other.java" not in sent  # only files present in the chunk
+    assert sent.endswith(diff)
+
+
+def test_ai_review_file_context_respects_char_budget():
+    settings = _make_settings()
+    settings.AI_FILE_CONTEXT_MAX_CHARS = 50
+    reviewer = _make_reviewer(settings)
+    diff = "diff --git a/Foo.java b/Foo.java\n@@ -1 +1 @@\n+x\n"
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(_make_pr_context(diff=diff), ReviewConfig(), file_contents={"Foo.java": "y\n" * 100})
+    assert mock_create.call_args.kwargs["messages"][0]["content"] == diff
+
+
+def test_ai_review_requests_server_side_fallback():
+    reviewer = _make_reviewer(_make_settings())
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(_make_pr_context(), ReviewConfig())
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["fallbacks"] == "default"
+    assert "server-side-fallback-2026-07-01" in kwargs["betas"]

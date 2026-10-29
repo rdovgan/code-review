@@ -119,3 +119,21 @@ def test_queue_review_dedup_skips_when_lock_held():
 
     mock_apply.assert_not_called()
     assert response.status_code == 200
+
+
+def test_queue_review_lock_expires_after_five_minutes():
+    adapter = MagicMock()
+    ctx = _make_pr_context(changed_files=["a.java"])
+
+    from app.main import _queue_review
+
+    mock_redis = MagicMock()
+    mock_redis.set = AsyncMock(return_value=True)
+    mock_redis.aclose = AsyncMock()
+    with patch("app.main.aioredis.from_url", return_value=mock_redis), \
+         patch("app.main.process_review.apply_async") as mock_apply:
+        mock_apply.return_value.id = "task-1"
+        asyncio.run(_queue_review(ctx, "bitbucket", adapter))
+
+    assert mock_redis.set.call_args.args[0] == "review_lock:workspace/repo:1"
+    assert mock_redis.set.call_args.kwargs["ex"] == 300

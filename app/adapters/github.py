@@ -177,7 +177,7 @@ class GithubAdapter(GitPlatform):
         return comments
 
     def set_review_status(self, pr_context: PRContext, state: str, description: str) -> bool:
-        state_map = {"pending": "pending", "success": "success", "failure": "failure"}
+        state_map = {"pending": "pending", "success": "success", "failure": "failure", "stopped": "error"}
         gh_state = state_map.get(state, "pending")
         owner, repo = pr_context.repo_full_name.split("/", 1)
         url = f"{GITHUB_API}/repos/{owner}/{repo}/statuses/{pr_context.head_sha}"

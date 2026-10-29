@@ -11,6 +11,7 @@ import redis
 from app.config.settings import Settings
 from app.metrics import Metrics
 from app.models import Finding, PRContext, ReviewConfig, Severity
+from app.utils.diff_parser import split_diff_by_file
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,26 @@ Rules:
 
 JSON schema: [{"severity": "...", "file": "...", "line": 42, "message": "...", "suggestion": "..."}]
 """
+
+
+class AIReviewResult(list):
+    """Findings of one AI review plus how much of the diff was actually reviewed.
+
+    A list subclass so callers that only need the findings can treat it as one.
+    stop_reason is None when every chunk was reviewed, otherwise one of
+    "budget", "deadline", "chunk_cap", "parse_failures", "errors".
+    """
+
+    def __init__(self, findings=(), chunks_total: int = 0, chunks_reviewed: int = 0,
+                 stop_reason: Optional[str] = None) -> None:
+        super().__init__(findings)
+        self.chunks_total = chunks_total
+        self.chunks_reviewed = chunks_reviewed
+        self.stop_reason = stop_reason
+
+    @property
+    def complete(self) -> bool:
+        return self.stop_reason is None
 
 
 class AIReviewer:
@@ -101,11 +122,12 @@ class AIReviewer:
             return [diff]
         return self._split_by_file(diff)
 
-    def _parse_response(self, text: str) -> list[dict]:
+    def _parse_response(self, text: str) -> Optional[list]:
+        """Parsed JSON array, or None if the response isn't one ([] is a valid "no issues")."""
         text = text.strip()
         if not text:
             logger.warning("AI returned empty response")
-            return []
+            return None
         if text.startswith("```"):
             lines = text.splitlines()
             # Remove opening fence (```json or ```)
@@ -123,10 +145,14 @@ class AIReviewer:
                     text = text[start : end + 1]
                     logger.info("Extracted JSON array from mixed AI response")
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
         except json.JSONDecodeError:
             logger.warning("Failed to parse AI response as JSON (first 500 chars): %s", text[:500])
-            return []
+            return None
+        if not isinstance(parsed, list):
+            logger.warning("AI response is JSON but not an array: %s", text[:200])
+            return None
+        return parsed
 
     def _validate_finding(self, item: dict) -> Optional[Finding]:
         required = {"severity", "file", "line", "message", "suggestion"}
@@ -134,25 +160,36 @@ class AIReviewer:
             return None
         try:
             severity = Severity(item["severity"])
-        except ValueError:
+            line = int(item["line"])
+        except (ValueError, TypeError):
             return None
         return Finding(
             severity=severity,
             file=str(item["file"]),
-            line=int(item["line"]),
+            line=line,
             message=str(item["message"]),
             suggestion=str(item["suggestion"]),
             source="ai",
         )
 
     def _call_claude(self, prompt: str, chunk: str) -> tuple[str, int, int]:
-        response = self._client.messages.create(
+        # Security-review diffs can trip a model's safety classifier; "default" fallbacks
+        # re-run a declined request on a fallback model inside the same call.
+        response = self._client.beta.messages.create(
             model=self._settings.AI_MODEL,
             max_tokens=self._settings.AI_MAX_TOKENS,
             system=prompt,
             messages=[{"role": "user", "content": chunk}],
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
         )
-        text = response.content[0].text
+        if response.stop_reason == "refusal":
+            category = getattr(response.stop_details, "category", None) if response.stop_details else None
+            raise RuntimeError(f"model declined the request (category={category})")
+        if response.stop_reason == "max_tokens":
+            logger.warning("AI response hit max_tokens=%d — JSON is likely truncated", self._settings.AI_MAX_TOKENS)
+        # Thinking blocks come before the answer — read only the text blocks
+        text = "".join(block.text for block in response.content if block.type == "text")
         return text, response.usage.input_tokens, response.usage.output_tokens
 
     def _call_glm(self, prompt: str, chunk: str) -> tuple[str, int, int]:
@@ -182,17 +219,50 @@ class AIReviewer:
     # can still merge findings, post comments and finalize the build status.
     _DEADLINE_RESERVE_SECONDS = 60
 
-    def review(self, pr_context: PRContext, config: ReviewConfig, deadline: Optional[float] = None) -> list[Finding]:
+    def _with_file_context(self, chunk: str, file_contents: dict[str, Optional[str]]) -> str:
+        """Prepend the full new version of the chunk's files (line-numbered) to the diff.
+
+        The diff alone has 3 lines of context, which makes "missing null check"-style
+        false positives likely; the numbered file also gives the model exact line numbers.
+        """
+        budget = self._settings.AI_FILE_CONTEXT_MAX_CHARS
+        if budget <= 0 or not file_contents:
+            return chunk
+        sections = []
+        for fd in split_diff_by_file(chunk):
+            content = file_contents.get(fd.path)
+            if not content:
+                continue
+            numbered = "\n".join(f"{n:>5}| {line}" for n, line in enumerate(content.splitlines(), 1))
+            if len(numbered) > budget:
+                logger.info("File context for %s skipped: %d chars over remaining budget %d", fd.path, len(numbered), budget)
+                continue
+            budget -= len(numbered)
+            sections.append(f"### {fd.path}\n{numbered}")
+        if not sections:
+            return chunk
+        return (
+            "FULL_FILE_CONTEXT — the new version of the changed files, line-numbered. Use it to understand "
+            "the code around the change and for exact line numbers; report issues only on lines changed in the DIFF.\n\n"
+            + "\n\n".join(sections)
+            + "\n\n---\nDIFF:\n"
+            + chunk
+        )
+
+    def review(self, pr_context: PRContext, config: ReviewConfig, deadline: Optional[float] = None,
+               file_contents: Optional[dict[str, Optional[str]]] = None) -> AIReviewResult:
         prompt = self._load_prompt(pr_context.language)
         chunks = self._split_if_needed(pr_context.diff)
+        result = AIReviewResult(chunks_total=len(chunks))
         if len(chunks) > self._MAX_CHUNKS:
             logger.warning(
                 "Diff produced %d chunks, capping at %d to avoid runaway AI calls",
                 len(chunks), self._MAX_CHUNKS,
             )
             chunks = chunks[:self._MAX_CHUNKS]
-        findings: list[Finding] = []
+            result.stop_reason = "chunk_cap"
         consecutive_parse_failures = 0
+        failed_chunks = 0
         for i, chunk in enumerate(chunks):
             # Wall-clock guard: stop before the task's Celery time limit kills
             # us mid-review — partial findings still get posted and the build
@@ -200,14 +270,16 @@ class AIReviewer:
             if deadline is not None and time.monotonic() > deadline - self._DEADLINE_RESERVE_SECONDS:
                 logger.warning(
                     "AI review deadline reached (%d/%d chunks) — returning %d partial finding(s)",
-                    i, len(chunks), len(findings),
+                    i, len(chunks), len(result),
                 )
+                result.stop_reason = "deadline"
                 break
             # Pre-check budget before sending
             if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
                 used = int(self._redis.get(self._budget_key()) or 0)
                 if used >= self._settings.AI_DAILY_TOKEN_BUDGET:
                     logger.warning("Daily AI token budget reached (%d), skipping AI review", used)
+                    result.stop_reason = "budget"
                     break
             # Circuit breaker: too many consecutive bad responses → stop
             if consecutive_parse_failures >= self._MAX_CONSECUTIVE_PARSE_FAILURES:
@@ -215,27 +287,34 @@ class AIReviewer:
                     "AI parse failure circuit breaker tripped (%d consecutive), aborting AI review",
                     consecutive_parse_failures,
                 )
+                result.stop_reason = "parse_failures"
                 break
             try:
+                request = self._with_file_context(chunk, file_contents or {})
                 if self._provider == "glm":
-                    text, input_tokens, output_tokens = self._call_glm(prompt, chunk)
+                    text, input_tokens, output_tokens = self._call_glm(prompt, request)
                 else:
-                    text, input_tokens, output_tokens = self._call_claude(prompt, chunk)
+                    text, input_tokens, output_tokens = self._call_claude(prompt, request)
                 self._check_and_record_tokens(input_tokens, output_tokens)
                 logger.debug("AI raw response (chunk %d/%d): %s", i + 1, len(chunks), text)
                 items = self._parse_response(text)
-                if not items:
+                if items is None:
                     consecutive_parse_failures += 1
-                else:
-                    consecutive_parse_failures = 0
+                    failed_chunks += 1
+                    continue
+                consecutive_parse_failures = 0
+                result.chunks_reviewed += 1
                 for item in items:
-                    f = self._validate_finding(item)
+                    f = self._validate_finding(item) if isinstance(item, dict) else None
                     if f:
-                        findings.append(f)
+                        result.append(f)
             except Exception as exc:
                 logger.error("AI review chunk failed: %s", exc)
                 consecutive_parse_failures += 1
-        return findings
+                failed_chunks += 1
+        if result.stop_reason is None and failed_chunks:
+            result.stop_reason = "errors"
+        return result
 
     def verify_semgrep_findings(self, findings: list[Finding], pr_context: PRContext) -> list[Finding]:
         """Re-check Semgrep findings with AI and drop ones it judges to be false positives.

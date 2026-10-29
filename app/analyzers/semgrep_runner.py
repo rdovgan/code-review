@@ -1,4 +1,3 @@
-import fnmatch
 import json
 import logging
 import os
@@ -6,12 +5,13 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 from app.adapters.base import GitPlatform
 from app.config.settings import Settings, get_settings
 from app.metrics import Metrics
 from app.models import Finding, PRContext, ReviewConfig, Severity
-from app.utils.diff_parser import parse_diff_for_changed_lines
+from app.utils.diff_parser import is_ignored, parse_diff_for_changed_lines
 
 logger = logging.getLogger(__name__)
 
@@ -42,21 +42,35 @@ class SemgrepRunner:
         self._config = config
         self._metrics = Metrics(get_settings().REDIS_URL)
 
-    def run(self, pr_context: PRContext, adapter: GitPlatform) -> list[Finding]:
+    def run(self, pr_context: PRContext, adapter: GitPlatform,
+            file_contents: Optional[dict[str, Optional[str]]] = None) -> list[Finding]:
+        """Run Semgrep on the PR's changed files.
+
+        file_contents: contents already fetched by the worker (path -> text, None if missing);
+        files not in it are fetched from the platform.
+        """
         changed_lines_map = parse_diff_for_changed_lines(pr_context.diff)
-        
+
+        # Findings are only kept on changed lines, so files absent from the (prepared) diff
+        # can't produce anything — don't spend API calls downloading them.
         filtered_files = [
             f for f in pr_context.changed_files
-            if not any(fnmatch.fnmatch(f, pat) for pat in self._config.ignore_paths)
+            if f in changed_lines_map and not is_ignored(f, self._config.ignore_paths)
         ]
+        file_contents = file_contents or {}
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             written: list[str] = []
-            for i, rel_path in enumerate(filtered_files):
-                if i > 0:
-                    time.sleep(0.3)  # avoid Bitbucket rate limiting on bulk file fetches
-                content = adapter.get_file_content(pr_context, rel_path, pr_context.head_sha)
+            fetched = 0
+            for rel_path in filtered_files:
+                if rel_path in file_contents:
+                    content = file_contents[rel_path]
+                else:
+                    if fetched > 0:
+                        time.sleep(0.3)  # avoid Bitbucket rate limiting on bulk file fetches
+                    content = adapter.get_file_content(pr_context, rel_path, pr_context.head_sha)
+                    fetched += 1
                 if content is None:
                     continue
                 dest = tmp_path / rel_path

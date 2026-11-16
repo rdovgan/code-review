@@ -1,6 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 celery[redis]==5.4.0
+# kombu 5.7+ needs redis-py >= 6.4; unpinned, a rebuild pulls it and the worker crashes on start
+kombu==5.6.2
 redis==5.0.8
 anthropic>=2.3.0  # beta.messages fallbacks
 openai>=1.0.0

@@ -51,6 +51,7 @@ class PRContext:
     source_branch: str = ""
     changed_files: list[str] = field(default_factory=list)
     is_new_pr: bool = False
+    description: str = ""
 
 
 @dataclass
@@ -59,6 +60,10 @@ class ReviewConfig:
     ai_review: bool = True
     static_analysis: bool = True
     semgrep_ai_verify: bool = True
+    # Second AI pass that tries to refute each AI finding before it is posted
+    ai_verify: bool = True
+    # Repo files (read at the target branch) sent to the AI as project conventions
+    ai_context_files: list[str] = field(default_factory=lambda: ["CLAUDE.md"])
     block_merge_on: list[str] = field(default_factory=lambda: ["CRITICAL"])
     max_diff_lines: int = 500
     slack_channel: str = ""

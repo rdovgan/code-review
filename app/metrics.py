@@ -15,6 +15,7 @@ Dimensional data is stored as hashes with composite field "label1:label2":
   metrics:duration_by_project → {"rdovgan/dungeon:sum_ms": N, "rdovgan/dungeon:count": N, ...}
   metrics:ai_tokens_by_provider → {"claude:input": N, "claude:output": N, ...}
   metrics:semgrep_verify → {"kept": N, "dropped": N, "fail_open": N}
+  metrics:ai_verify      → {"kept": N, "dropped": N, "fail_open": N}
   metrics:semgrep_errors → {"timeout": N, "bad_exit": N, "invalid_json": N}
 
 The `ai_tokens:<date>` key (no "metrics:" prefix, one per day) is owned and written by
@@ -51,6 +52,8 @@ class Metrics:
     # Semgrep AI verification — shared with app/analyzers/ai_reviewer.py (fail-open events)
     # and app/workers/celery_app.py (kept/dropped totals).
     SEMGREP_VERIFY_KEY = "metrics:semgrep_verify"
+    # AI findings re-checked by a second AI pass — written by app/analyzers/ai_reviewer.py.
+    AI_VERIFY_KEY = "metrics:ai_verify"
 
     # Semgrep runner errors — shared with app/analyzers/semgrep_runner.py.
     SEMGREP_ERRORS_KEY = "metrics:semgrep_errors"
@@ -195,6 +198,7 @@ class Metrics:
             ai_tokens_today = int(self._r.get(f"{self.AI_TOKENS_TODAY_PREFIX}:{date.today().isoformat()}") or 0)
             ai_budget_exceeded = int(self._r.get(self.AI_BUDGET_EXCEEDED_KEY) or 0)
             semgrep_verify = self._r.hgetall(self.SEMGREP_VERIFY_KEY)
+            ai_verify = self._r.hgetall(self.AI_VERIFY_KEY)
             semgrep_errors = self._r.hgetall(self.SEMGREP_ERRORS_KEY)
             task_retries = int(self._r.get(self._TASK_RETRIES_KEY) or 0)
         except Exception:
@@ -354,6 +358,19 @@ class Metrics:
             "# HELP code_review_semgrep_verify_fail_open_total Times semgrep AI verification failed open (kept findings unfiltered)",
             "# TYPE code_review_semgrep_verify_fail_open_total counter",
             f"code_review_semgrep_verify_fail_open_total {semgrep_verify.get('fail_open', 0)}",
+        ]
+
+        # --- AI finding verification ---
+        lines += [
+            "# HELP code_review_ai_verify_total AI findings kept/dropped by the AI verification pass",
+            "# TYPE code_review_ai_verify_total counter",
+        ]
+        for result in ("kept", "dropped"):
+            lines.append(f'code_review_ai_verify_total{{result="{result}"}} {ai_verify.get(result, 0)}')
+        lines += [
+            "# HELP code_review_ai_verify_fail_open_total Times AI finding verification failed open (kept findings unverified)",
+            "# TYPE code_review_ai_verify_fail_open_total counter",
+            f"code_review_ai_verify_fail_open_total {ai_verify.get('fail_open', 0)}",
         ]
 
         # --- semgrep errors ---

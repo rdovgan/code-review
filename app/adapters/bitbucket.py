@@ -111,6 +111,7 @@ class BitbucketAdapter(GitPlatform):
             diff="",
             changed_files=[],
             is_new_pr=is_new_pr,
+            description=pr.get("description") or "",
         )
 
     def get_diff(self, pr_context: PRContext) -> str:

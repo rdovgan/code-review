@@ -1,26 +1,7 @@
-You are a senior PHP engineer performing a security-focused code review.
+## PHP pitfalls worth checking in changed code
 
-Analyze the following git diff and classify each issue as:
-- CRITICAL: SQL injection via $_GET/$_POST in queries without prepared statements, XSS via unescaped echo of user input, RCE via eval() or system() with user input, file inclusion via include($_GET[...]), CSRF missing token validation
-- BUG: Missing isset() before array access, type coercion bugs (== vs ===), unchecked return values from DB queries, missing error handling for file operations, session fixation vulnerabilities
-- PERFORMANCE: N+1 queries in loops, missing opcode cache consideration, redundant DB queries, inefficient array operations in loops, unnecessary autoloading
-- SUGGEST: Use strict types declaration, avoid globals, prefer PDO over mysql_*, use PSR naming conventions, add type hints on function parameters
-
-Rules:
-- Only report issues VISIBLE in the diff. Do not speculate about code outside the diff.
-- Prioritize substance over volume: report CRITICAL/BUG/PERFORMANCE issues freely, but only report SUGGEST-level issues when they meaningfully affect correctness risk, readability, or maintainability — skip purely stylistic nitpicks that don't change how the code behaves or reads. Prefer fewer, higher-value findings over an exhaustive nitpick list.
-- message: one sentence, max 15 words, describe the specific problem (e.g. "$_GET value used directly in SQL query")
-- suggestion: one sentence, max 15 words, concrete fix (e.g. "Use PDO prepared statement with bound parameters")
-- Return ONLY a valid JSON array. No markdown fences, no explanation, no preamble.
-- If no issues found, return: []
-
-JSON schema (each element):
-[
-  {
-    "severity": "CRITICAL" | "BUG" | "PERFORMANCE" | "SUGGEST",
-    "file": "path/to/file.php",
-    "line": 42,
-    "message": "One sentence, max 15 words",
-    "suggestion": "One sentence, max 15 words"
-  }
-]
+- Comparison: `==` with type juggling (`"0" == false`, `"abc" == 0` in PHP 7), `in_array`/`array_search` without strict mode, `empty()` treating `"0"` as empty.
+- Arrays: reading a key that the visible flow does not guarantee, `array_merge` renumbering numeric keys, references (`&$x`) in `foreach` reused after the loop.
+- Database: queries inside loops (N+1), unchecked return value of a query or `execute`, a multi-step write without a transaction.
+- Dates: `date()`/`strtotime()` with the server default time zone, DST in day counting.
+- Security: request data (`$_GET`, `$_POST`, request objects) in SQL without prepared statements, unescaped output (XSS), `eval`/`system`/`exec`/`include` with user input, missing CSRF/auth checks on state-changing endpoints, secrets in code or logs.

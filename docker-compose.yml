@@ -25,7 +25,7 @@ services:
       - ./config:/app/config:ro
       # Agentic review (review_mode agentic/shadow): the server's shared shallow clones,
       # read-only — the bot never fetches or checks out there (PROJECTS_SNAPSHOT_DIR)
-      - /opt/projects:/projects:ro
+      - ${PROJECTS_HOST_DIR:-/opt/projects}:/projects:ro
       # The bot's own depth-1 clones of other target branches (BRANCH_SNAPSHOT_DIR)
       - branch_snapshots:/repos
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2

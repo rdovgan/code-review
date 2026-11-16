@@ -24,6 +24,10 @@ def send_message(webhook_url: str, text: str = "", attachments: list[dict] | Non
         resp = httpx.post(webhook_url, json=payload, timeout=10)
         resp.raise_for_status()
         return True
+    except httpx.HTTPStatusError as exc:
+        # str(exc) contains the request URL, and the webhook URL is a secret
+        logger.warning("Failed to post Mattermost message: HTTP %s", exc.response.status_code)
+        return False
     except Exception as exc:
-        logger.warning("Failed to post Mattermost message: %s", exc)
+        logger.warning("Failed to post Mattermost message: %s", type(exc).__name__)
         return False

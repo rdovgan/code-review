@@ -53,6 +53,7 @@ class AIReviewer:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._redis = redis.from_url(settings.REDIS_URL)
+        self._last_truncated = False  # the last call hit max_tokens (set by _call_claude/_call_glm)
 
         provider = settings.AI_PROVIDER.lower()
         if provider == "glm":
@@ -119,6 +120,18 @@ class AIReviewer:
         if current:
             chunks.append("".join(current))
         return chunks if chunks else [diff]
+
+    def _halve(self, chunk: str) -> Optional[list[str]]:
+        """Split a multi-file chunk into two by size; None for a single file."""
+        files = self._split_by_file(chunk)
+        if len(files) < 2:
+            return None
+        half, size = len(chunk) / 2, 0
+        for k, f in enumerate(files[:-1], 1):
+            size += len(f)
+            if size >= half:
+                break
+        return ["".join(files[:k]), "".join(files[k:])]
 
     def _split_if_needed(self, diff: str) -> list[str]:
         """Whole files packed into requests of up to AI_MAX_DIFF_TOKENS, in diff order.
@@ -206,6 +219,7 @@ class AIReviewer:
             category = getattr(response.stop_details, "category", None) if response.stop_details else None
             raise RuntimeError(f"model declined the request (category={category})")
         if response.stop_reason == "max_tokens":
+            self._last_truncated = True
             logger.warning("AI response hit max_tokens=%d — JSON is likely truncated", self._settings.AI_MAX_TOKENS)
         # Thinking blocks come before the answer — read only the text blocks
         text = "".join(block.text for block in response.content if block.type == "text")
@@ -221,6 +235,9 @@ class AIReviewer:
             ],
         )
         text = response.choices[0].message.content
+        if response.choices[0].finish_reason == "length":
+            # Reasoning models can spend the whole budget thinking and return no answer at all
+            self._last_truncated = True
         if not text:
             finish_reason = response.choices[0].finish_reason
             logger.warning(
@@ -287,7 +304,10 @@ class AIReviewer:
             result.stop_reason = "chunk_cap"
         consecutive_parse_failures = 0
         failed_chunks = 0
-        for i, chunk in enumerate(chunks):
+        i = -1
+        while i + 1 < len(chunks):  # a while loop: a cut-off answer splits its chunk in place
+            i += 1
+            chunk = chunks[i]
             # Wall-clock guard: stop before the task's Celery time limit kills
             # us mid-review — partial findings still get posted and the build
             # status gets finalized instead of being stuck on "in progress".
@@ -319,6 +339,17 @@ class AIReviewer:
                 self._check_and_record_tokens(input_tokens, output_tokens)
                 logger.debug("AI raw response (chunk %d/%d): %s", i + 1, len(chunks), text)
                 items = self._parse_response(text)
+                if items is None and self._last_truncated:
+                    halves = self._halve(chunk) if len(chunks) < self._MAX_CHUNKS * 2 else None
+                    if halves:
+                        logger.warning("AI answer cut off at max_tokens=%d — splitting this part (%d files) "
+                                       "in two and retrying", self._settings.AI_MAX_TOKENS,
+                                       len(self._split_by_file(chunk)))
+                        chunks[i + 1:i + 1] = halves
+                        result.chunks_total += 1
+                        continue
+                    logger.warning("AI answer cut off at max_tokens=%d on a single file — raise AI_MAX_TOKENS",
+                                   self._settings.AI_MAX_TOKENS)
                 if items is None:
                     consecutive_parse_failures += 1
                     failed_chunks += 1
@@ -340,6 +371,7 @@ class AIReviewer:
         return result
 
     def _call(self, prompt: str, request: str) -> tuple[str, int, int]:
+        self._last_truncated = False
         if self._provider == "glm":
             return self._call_glm(prompt, request)
         return self._call_claude(prompt, request)

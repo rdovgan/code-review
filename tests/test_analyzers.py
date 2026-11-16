@@ -484,3 +484,57 @@ def test_ai_verification_skipped_when_disabled_or_nothing_found():
     with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
         reviewer.review(_make_pr_context(), ReviewConfig())
     assert mock_create.call_count == 1
+
+
+def _glm_reviewer():
+    settings = _make_settings()
+    settings.AI_PROVIDER = "glm"
+    settings.ZAI_API_KEY = "z"
+    settings.AI_MAX_DIFF_TOKENS = 100_000  # two files in one request
+    return _make_reviewer(settings)
+
+
+def _glm_response(content, finish_reason="stop"):
+    from types import SimpleNamespace
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish_reason)],
+                           usage=SimpleNamespace(prompt_tokens=100, completion_tokens=50))
+
+
+def test_cut_off_answer_splits_the_part_and_retries():
+    """glm-5.3-flash spent all of max_tokens thinking on a big PR and answered nothing (PR #52)."""
+    reviewer = _glm_reviewer()
+    found = json.dumps([{"severity": "BUG", "file": "File1.java", "line": 3, "message": "m", "suggestion": "s"}])
+    responses = [_glm_response(None, "length"), _glm_response("[]"), _glm_response(found)]
+    with patch.object(reviewer._client.chat.completions, "create", side_effect=responses) as create:
+        result = reviewer.review(_make_pr_context(diff=_multi_file_diff(2)), ReviewConfig(ai_verify=False))
+    assert create.call_count == 3
+    halves = [c.kwargs["messages"][1]["content"] for c in create.call_args_list[1:]]
+    assert "File0.java" in halves[0] and "File1.java" not in halves[0] and "File1.java" in halves[1]
+    assert result.complete and result.chunks_total == 2 and result.chunks_reviewed == 2
+    assert [f.line for f in result] == [3]
+
+
+def test_cut_off_answer_on_a_single_file_is_a_failed_part():
+    reviewer = _glm_reviewer()
+    with patch.object(reviewer._client.chat.completions, "create", return_value=_glm_response(None, "length")) as create:
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    assert create.call_count == 1
+    assert result.stop_reason == "errors" and result.chunks_reviewed == 0
+
+
+def test_mattermost_failure_never_logs_the_webhook_url(caplog):
+    import httpx
+    import respx
+    from app.notifiers import mattermost
+    url = "https://chat.example.com/hooks/s3cr3t-hook-id"
+    with respx.mock:
+        respx.post(url).mock(return_value=httpx.Response(404))
+        assert mattermost.send_message(url, text="hi") is False
+    assert "s3cr3t-hook-id" not in caplog.text
+    assert "HTTP 404" in caplog.text
+
+
+def test_http_client_request_lines_are_not_logged():
+    import logging
+    import app.workers.celery_app  # noqa: F401  (configures the loggers on import)
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING

@@ -1,31 +1,41 @@
 """Read-only code tools the review agent calls: read files, grep, find files, list dirs.
 
-Every tool reads a fixed git revision of a mirror (the PR's head commit, or a context
-repo's default branch). Tool errors come back as text for the model — they never raise.
+Each repository is a working-tree snapshot (app/context/snapshots.py). For the PR's own
+repository the files changed in the PR are laid over the snapshot at their PR version
+(and files the PR deletes or renames away are hidden), so the agent sees the code as it
+is with this PR applied — without anyone checking out the PR branch.
+
+Tool errors come back as text for the model — they never raise.
 """
 import fnmatch
 import logging
+import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+from app.context.snapshots import git
 
 logger = logging.getLogger(__name__)
 
-_GIT_TIMEOUT = 30
 _MAX_READ_LINES = 400
 _MAX_GREP_MATCHES = 80
 _MAX_LINE_CHARS = 300
 _MAX_FOUND_FILES = 100
 
 
-@dataclass(frozen=True)
+@dataclass
 class RepoView:
-    """One repository at one revision, as the agent sees it."""
+    """One repository as the agent sees it."""
     name: str
-    git_dir: Path
-    rev: str
-    description: str  # e.g. "this PR, at its head commit"
+    root: Path
+    description: str
+    # PR overlay: path → content at the PR's head, or None for a file the PR removes
+    overlay: dict[str, Optional[str]] = field(default_factory=dict)
+    # Changed files not prefetched: read_file fetches them on demand through `fetch`
+    lazy_paths: set[str] = field(default_factory=set)
+    fetch: Optional[Callable[[str], Optional[str]]] = None
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -45,7 +55,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "grep",
-        "description": "Search file contents (git grep, extended regex). Returns path:line:text, at most 80 matches. "
+        "description": "Search file contents (extended regex). Returns path:line:text, at most 80 matches. "
                        "Use it to find callers, definitions and usages.",
         "parameters": {
             "type": "object",
@@ -98,10 +108,6 @@ class CodeTools:
         lines = [f"- {r.name}: {r.description}" for r in self._repos.values()]
         return "AVAILABLE_REPOSITORIES (pass the name as `repo`; the first one is the default):\n" + "\n".join(lines)
 
-    @property
-    def repo_names(self) -> list[str]:
-        return list(self._repos)
-
     # --- dispatch ---
 
     def run(self, name: str, args: Any) -> str:
@@ -118,10 +124,11 @@ class CodeTools:
         if handler is None:
             return f"ERROR: unknown tool {name!r}"
         try:
-            repo = self._repo(args.get("repo"))
-            result = handler(repo, args)
+            result = handler(self._repo(args.get("repo")), args)
         except _ToolError as exc:
             result = f"ERROR: {exc}"
+        except subprocess.TimeoutExpired:
+            result = "ERROR: search took too long — narrow it down"
         except Exception as exc:  # a tool must never break the agent loop
             logger.warning("Tool %s failed: %s", name, exc)
             result = f"ERROR: {type(exc).__name__}"
@@ -133,13 +140,15 @@ class CodeTools:
         path = _clean_path(args.get("path"))
         if not path:
             raise _ToolError("path is required")
-        content = self._git(repo, "show", f"{repo.rev}:{path}", missing=f"file not found: {path}")
+        content = self._content(repo, path)
+        if content is None:
+            raise _ToolError(f"file not found: {path}")
         lines = content.splitlines()
         start = max(1, _int(args.get("start_line"), 1))
-        end = _int(args.get("end_line"), start + _MAX_READ_LINES - 1)
-        end = min(end, start + _MAX_READ_LINES - 1, len(lines))
         if start > len(lines):
             return f"{path} has {len(lines)} lines"
+        end = _int(args.get("end_line"), start + _MAX_READ_LINES - 1)
+        end = max(start, min(end, start + _MAX_READ_LINES - 1, len(lines)))
         body = "\n".join(f"{n:>5}| {lines[n - 1]}" for n in range(start, end + 1))
         more = f"\n… {len(lines) - end} more lines (file has {len(lines)})" if end < len(lines) else ""
         return f"{repo.name}:{path} lines {start}-{end}\n{body}{more}"
@@ -148,42 +157,63 @@ class CodeTools:
         pattern = args.get("pattern")
         if not isinstance(pattern, str) or not pattern:
             raise _ToolError("pattern is required")
-        cmd = ["grep", "-n", "-I", "--no-color", "-F" if args.get("fixed_string") else "-E", "-e", pattern, repo.rev, "--"]
-        glob = args.get("path_glob")
-        if isinstance(glob, str) and glob.strip():
-            cmd.append(f":(glob){_clean_path(glob)}")
-        out = self._git(repo, *cmd, no_match_ok=True)
-        if not out.strip():
+        fixed = bool(args.get("fixed_string"))
+        glob = _clean_path(args.get("path_glob")) if isinstance(args.get("path_glob"), str) else ""
+
+        cmd = ["grep", "-n", "-I", "--no-color", "-F" if fixed else "-E", "-e", pattern, "--"]
+        if glob:
+            cmd.append(f":(glob){glob}")
+        proc = git(repo.root, *cmd)
+        if proc.returncode not in (0, 1) or (proc.returncode == 1 and proc.stderr.strip()):
+            raise _ToolError(proc.stderr.strip()[:300] or "grep failed")
+        # Snapshot matches, except in files the PR changed — those are searched in their PR version
+        matches = [m for m in proc.stdout.splitlines() if m.split(":", 1)[0] not in repo.overlay]
+        matches += self._grep_overlay(repo, pattern, fixed, glob)
+        if not matches:
             return "no matches"
-        prefix = f"{repo.rev}:"
-        matches = []
-        for line in out.splitlines():
-            line = line[len(prefix):] if line.startswith(prefix) else line
-            matches.append(line if len(line) <= _MAX_LINE_CHARS else line[:_MAX_LINE_CHARS] + "…")
-        shown = matches[:_MAX_GREP_MATCHES]
-        tail = f"\n… {len(matches) - len(shown)} more matches — narrow the pattern or path_glob" if len(matches) > len(shown) else ""
+        matches.sort()
+        shown = [m if len(m) <= _MAX_LINE_CHARS else m[:_MAX_LINE_CHARS] + "…" for m in matches[:_MAX_GREP_MATCHES]]
+        tail = (f"\n… {len(matches) - len(shown)} more matches — narrow the pattern or path_glob"
+                if len(matches) > len(shown) else "")
         return "\n".join(shown) + tail
+
+    def _grep_overlay(self, repo: RepoView, pattern: str, fixed: bool, glob: str) -> list[str]:
+        if not repo.overlay:
+            return []
+        try:
+            regex = re.compile(re.escape(pattern) if fixed else pattern)
+        except re.error:
+            return []  # git accepted the ERE, Python can't: the PR's versions just aren't searched
+        out = []
+        for path, content in repo.overlay.items():
+            if content is None or (glob and not _glob_match(path, glob)):
+                continue
+            for n, line in enumerate(content.splitlines(), 1):
+                if regex.search(line):
+                    out.append(f"{path}:{n}:{line}")
+        return out
 
     def _find_files(self, repo: RepoView, args: dict) -> str:
         glob = args.get("name_glob")
         if not isinstance(glob, str) or not glob.strip():
             raise _ToolError("name_glob is required")
-        found = [p for p in self._all_files(repo)
-                 if fnmatch.fnmatch(p, glob) or fnmatch.fnmatch(p.rsplit("/", 1)[-1], glob)]
+        found = [p for p in self._files(repo) if _glob_match(p, glob) or fnmatch.fnmatch(p.rsplit("/", 1)[-1], glob)]
         if not found:
             return "no files found"
         tail = f"\n… {len(found) - _MAX_FOUND_FILES} more" if len(found) > _MAX_FOUND_FILES else ""
         return "\n".join(found[:_MAX_FOUND_FILES]) + tail
 
     def _list_dir(self, repo: RepoView, args: dict) -> str:
-        path = _clean_path(args.get("path") or "")
-        treeish = f"{repo.rev}:{path}" if path else repo.rev
-        out = self._git(repo, "ls-tree", treeish, missing=f"directory not found: {path}")
-        entries = []
-        for line in out.splitlines():
-            meta, _, name = line.partition("\t")
-            entries.append(name + "/" if " tree " in f" {meta} " else name)
-        return "\n".join(entries) or "empty directory"
+        path = _clean_path(args.get("path") or "").rstrip("/")
+        prefix = f"{path}/" if path else ""
+        entries = set()
+        for file in self._files(repo):
+            if file.startswith(prefix):
+                head, sep, _ = file[len(prefix):].partition("/")
+                entries.add(head + "/" if sep else head)
+        if not entries:
+            raise _ToolError(f"directory not found: {path}")
+        return "\n".join(sorted(entries))
 
     # --- helpers ---
 
@@ -195,25 +225,31 @@ class CodeTools:
             raise _ToolError(f"unknown repo {name!r}; available: {', '.join(self._repos)}")
         return repo
 
-    def _all_files(self, repo: RepoView) -> list[str]:
+    def _files(self, repo: RepoView) -> list[str]:
+        """Tracked files of the snapshot with the PR's added/removed files applied."""
         if repo.name not in self._file_lists:
-            out = self._git(repo, "ls-tree", "-r", "--name-only", repo.rev)
-            self._file_lists[repo.name] = out.splitlines()
+            proc = git(repo.root, "ls-files")
+            if proc.returncode != 0:
+                raise _ToolError(proc.stderr.strip()[:300] or "cannot list files")
+            files = set(proc.stdout.splitlines())
+            for path, content in repo.overlay.items():
+                (files.discard if content is None else files.add)(path)
+            files |= repo.lazy_paths
+            self._file_lists[repo.name] = sorted(files)
         return self._file_lists[repo.name]
 
-    def _git(self, repo: RepoView, *args: str, missing: str = "", no_match_ok: bool = False) -> str:
-        try:
-            proc = subprocess.run(["git", f"--git-dir={repo.git_dir}", *args],
-                                  capture_output=True, text=True, timeout=_GIT_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            raise _ToolError("search took too long — narrow it down")
-        if proc.returncode == 0:
-            return proc.stdout
-        if no_match_ok and proc.returncode == 1 and not proc.stderr.strip():
-            return ""
-        if missing:
-            raise _ToolError(missing)
-        raise _ToolError(proc.stderr.strip()[:300] or f"git {args[0]} failed")
+    def _content(self, repo: RepoView, path: str) -> Optional[str]:
+        if path in repo.overlay:
+            return repo.overlay[path]
+        if path in repo.lazy_paths and repo.fetch is not None:
+            content = repo.fetch(path)
+            repo.overlay[path] = content
+            return content
+        root = repo.root.resolve()
+        target = (root / path).resolve()
+        if root not in target.parents or ".git" in target.relative_to(root).parts or not target.is_file():
+            return None
+        return target.read_text(errors="replace")
 
     def _cap(self, text: str) -> str:
         if len(text) <= self._max_chars:
@@ -227,6 +263,11 @@ class _ToolError(Exception):
 
 def _clean_path(path: Any) -> str:
     return str(path or "").strip().lstrip("/").removeprefix("./")
+
+
+def _glob_match(path: str, glob: str) -> bool:
+    """Glob with ** — fnmatch's * already crosses '/', so '**/' also has to match nothing."""
+    return fnmatch.fnmatch(path, glob) or (glob.startswith("**/") and fnmatch.fnmatch(path, glob[3:]))
 
 
 def _int(value: Any, default: int) -> int:

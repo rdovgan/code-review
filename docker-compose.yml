@@ -23,8 +23,11 @@ services:
       - .env
     volumes:
       - ./config:/app/config:ro
-      # Bare git mirrors for review_mode agentic/shadow (REPO_MIRRORS_DIR)
-      - repo_mirrors:/repos
+      # Agentic review (review_mode agentic/shadow): the server's shared shallow clones,
+      # read-only — the bot never fetches or checks out there (PROJECTS_SNAPSHOT_DIR)
+      - /opt/projects:/projects:ro
+      # The bot's own depth-1 clones of other target branches (BRANCH_SNAPSHOT_DIR)
+      - branch_snapshots:/repos
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
     depends_on:
       redis:
@@ -88,7 +91,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  repo_mirrors:
+  branch_snapshots:
   redis_data:
   prometheus_data:
   grafana_data:

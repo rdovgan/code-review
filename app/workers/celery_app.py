@@ -17,7 +17,7 @@ from app.analyzers.semgrep_runner import SemgrepRunner
 from app.config.project_config import detect_language, load_project_config
 from app.config.settings import get_settings
 from app.context.code_tools import CodeTools, RepoView
-from app.context.repo_mirror import RepoMirror, RepoUnavailable
+from app.context.snapshots import BranchSnapshot, SnapshotUnavailable, current_branch, shared_snapshot
 from app.context.review_context import gather_review_context
 from app.metrics import Metrics
 from app.models import PRContext, Severity
@@ -291,6 +291,7 @@ def _run_review(self, task_payload: dict) -> dict:
 
     # Ignored/deleted/binary files are dropped before the line limit is applied, and the
     # limit cuts at file/hunk boundaries — see prepare_diff()
+    raw_diff = pr_context.diff  # the agent's view of the repo also needs the files this drops (deleted ones)
     prepared = prepare_diff(pr_context.diff, config.ignore_paths, config.max_diff_lines)
     pr_context.diff = prepared.diff
     if prepared.ignored_files:
@@ -366,7 +367,8 @@ def _run_review(self, task_payload: dict) -> dict:
                 logger.info("%s Step 2/2: Agentic review started", pr_tag)
                 try:
                     ai_results = _agentic_review(adapter, pr_context, config, review_context,
-                                                 _agent_deadline(deadline, _soft_time_limit(self)))
+                                                 _agent_deadline(deadline, _soft_time_limit(self)), file_contents,
+                                                 raw_diff)
                     agentic_done = True
                     metrics.record_agentic("ok")
                     review_mode_note = (f"> 🔎 Deep review: the AI checked the change against the repository "
@@ -558,42 +560,83 @@ def _remaining(deadline: float) -> float:
     return max(30.0, deadline - time.monotonic())
 
 
-def _build_code_tools(adapter, pr_context: PRContext, config, deadline: float) -> CodeTools:
-    """Mirror of the PR's repo at its head commit, plus already-cloned context repos."""
-    if not settings.REPO_MIRRORS_DIR:
-        raise AgentReviewFailed("repository mirrors are disabled")
+def _base_snapshot(adapter, pr_context: PRContext, deadline: float):
+    """Snapshot of the PR's target branch: the shared one, or the bot's own for other branches."""
+    shared = shared_snapshot(settings.PROJECTS_SNAPSHOT_DIR, pr_context.repo_full_name)
+    if shared is None:
+        raise AgentReviewFailed(f"repository is not in {settings.PROJECTS_SNAPSHOT_DIR or 'the projects folder'}")
+    branch = current_branch(shared)
+    if branch == pr_context.target_branch:
+        return shared, f"{branch} (shared snapshot, refreshed nightly)"
     try:
         spec = adapter.git_clone_spec(pr_context.repo_full_name)
     except NotImplementedError:
-        raise AgentReviewFailed(f"{pr_context.platform} repositories cannot be cloned")
-    mirror = RepoMirror(settings.REPO_MIRRORS_DIR, pr_context.platform, pr_context.repo_full_name, spec,
-                        timeout=settings.REPO_SYNC_TIMEOUT)
+        raise AgentReviewFailed(f"no snapshot of {pr_context.target_branch} and {pr_context.platform} cannot be cloned")
+    snapshot = BranchSnapshot(settings.BRANCH_SNAPSHOT_DIR, pr_context.repo_full_name, pr_context.target_branch,
+                              spec, max_age_seconds=settings.BRANCH_SNAPSHOT_MAX_AGE_HOURS * 3600,
+                              timeout=settings.BRANCH_SNAPSHOT_CLONE_TIMEOUT)
     try:
-        mirror.ensure_commit(pr_context.head_sha, timeout=_remaining(deadline))
-    except RepoUnavailable as exc:
-        raise AgentReviewFailed(f"repository unavailable: {exc}")
+        return snapshot.ensure(timeout=_remaining(deadline)), f"{pr_context.target_branch} (bot snapshot)"
+    except SnapshotUnavailable as exc:
+        raise AgentReviewFailed(str(exc))
 
-    views = [RepoView(pr_context.repo_full_name, mirror.path, pr_context.head_sha,
-                      "the PR's repository, at the PR's head commit")]
-    for name in config.context_repos or []:
-        if name == pr_context.repo_full_name or "/" not in str(name):
+
+def _pr_overlay(pr_context: PRContext, raw_diff: str, file_contents: dict) -> tuple[dict, set]:
+    """Files the PR changes, at its head: (prefetched path → content or None if removed, paths to fetch lazily).
+
+    raw_diff is the diff before prepare_diff(), which drops deleted files.
+    """
+    overlay: dict[str, str | None] = {}
+    for fd in split_diff_by_file(raw_diff or pr_context.diff):
+        header = fd.text.split("\n", 1)[0].split()
+        old_path = header[2][2:] if len(header) >= 3 else ""
+        if fd.deleted:
+            overlay[fd.path] = None
             continue
+        if old_path and old_path != fd.path:  # rename: the old path is gone
+            overlay[old_path] = None
+        content = file_contents.get(fd.path)
+        if content is not None:
+            overlay[fd.path] = content
+    lazy = {p for p in pr_context.changed_files if p not in overlay}
+    return overlay, lazy
+
+
+def _build_code_tools(adapter, pr_context: PRContext, config, deadline: float, file_contents: dict,
+                      raw_diff: str) -> CodeTools:
+    """The PR's repo (target-branch snapshot + the PR's files on top), plus context repos."""
+    base, base_label = _base_snapshot(adapter, pr_context, deadline)
+    overlay, lazy = _pr_overlay(pr_context, raw_diff, file_contents)
+
+    def fetch(path: str) -> str | None:
         try:
-            workspace, slug = name.split("/", 1)
-            ctx_spec = get_adapter(pr_context.platform, workspace, slug, settings).git_clone_spec(name)
-            ctx_mirror = RepoMirror(settings.REPO_MIRRORS_DIR, pr_context.platform, name, ctx_spec,
-                                    timeout=settings.REPO_SYNC_TIMEOUT)
-            ctx_mirror.ensure_fresh(timeout=_remaining(deadline))
-            views.append(RepoView(name, ctx_mirror.path, "HEAD", "related repository, at its default branch"))
-        except Exception as exc:  # a missing context repo narrows the review, it doesn't stop it
-            logger.warning("[PR #%s %s] Context repo %s skipped: %s", pr_context.pr_id,
-                           pr_context.repo_full_name, name, exc)
+            return adapter.get_file_content(pr_context, path, pr_context.head_sha)
+        except Exception as exc:
+            logger.warning("Failed to fetch %s for the agent: %s", path, exc)
+            return None
+
+    views = [RepoView(pr_context.repo_full_name, base,
+                      f"the PR's repository — files changed in this PR at the PR's head commit, "
+                      f"all other files at {base_label}",
+                      overlay=overlay, lazy_paths=lazy, fetch=fetch)]
+    for name in config.context_repos or []:
+        if name == pr_context.repo_full_name:
+            continue
+        path = shared_snapshot(settings.PROJECTS_SNAPSHOT_DIR, str(name))
+        if path is None:
+            logger.warning("[PR #%s %s] Context repo %s skipped: not in %s", pr_context.pr_id,
+                           pr_context.repo_full_name, name, settings.PROJECTS_SNAPSHOT_DIR)
+            continue
+        views.append(RepoView(str(name), path,
+                              f"related repository, at {current_branch(path) or 'its main branch'} "
+                              f"(shared snapshot, refreshed nightly)"))
     return CodeTools(views, max_result_chars=settings.AGENT_TOOL_RESULT_MAX_CHARS)
 
 
-def _agentic_review(adapter, pr_context: PRContext, config, review_context: str, deadline: float):
+def _agentic_review(adapter, pr_context: PRContext, config, review_context: str, deadline: float,
+                    file_contents: dict | None = None, raw_diff: str = ""):
     """Raises on any failure — the caller falls back to the diff review."""
-    tools = _build_code_tools(adapter, pr_context, config, deadline)
+    tools = _build_code_tools(adapter, pr_context, config, deadline, file_contents or {}, raw_diff)
     return AgentReviewer(settings).review_agentic(pr_context, config, tools, context=review_context, deadline=deadline)
 
 
@@ -642,10 +685,12 @@ def process_shadow_review(self, task_payload: dict, posted: list[dict]) -> dict:
         config = load_project_config(adapter, pr_context)
         if pr_context.language == "auto":
             pr_context.language = config.language if config.language != "auto" else detect_language(pr_context.changed_files)
+        raw_diff = pr_context.diff
         pr_context.diff = prepare_diff(pr_context.diff, config.ignore_paths, config.max_diff_lines).diff
         review_context = gather_review_context(adapter, pr_context, config, settings,
                                                _fetch_commits(adapter, pr_context))
-        result = _agentic_review(adapter, pr_context, config, review_context, deadline)
+        file_contents = _fetch_file_contents(adapter, pr_context, [fd.path for fd in split_diff_by_file(pr_context.diff)])
+        result = _agentic_review(adapter, pr_context, config, review_context, deadline, file_contents, raw_diff)
         agent_findings = filter_by_config(merge_findings([], list(result)), config)
         record.update(agent=_finding_dicts(agent_findings), tool_calls=getattr(result, "tool_calls", 0))
         metrics.record_agentic("shadow_ok")

@@ -45,8 +45,8 @@ app/
 ├── context/
 │   ├── jira.py               # ticket key from branch/title + Jira REST fetch
 │   ├── review_context.py     # PR_CONTEXT block: description, commits, ticket, repo guides
-│   ├── repo_mirror.py        # bare git mirrors (clone/fetch, file lock); CLI to pre-clone
-│   └── code_tools.py         # read_file / grep / find_files / list_dir over a mirror at a sha
+│   ├── snapshots.py          # shared /opt/projects snapshots (read-only) + bot's depth-1 branch clones
+│   └── code_tools.py         # read_file / grep / find_files / list_dir: snapshot + the PR's files on top
 ├── workers/
 │   └── celery_app.py         # process_review task, ThreadPoolExecutor
 └── config/
@@ -131,7 +131,8 @@ docker compose up --build
 | AI findings verified by a second AI pass (`ai_verify`) | The reviewer over-reports; a skeptical pass on the same material drops unproven findings. Fails open, and CRITICAL is dropped only with a concrete reason |
 | `review_mode` diff / agentic / shadow per repo, central config only | Roll the agentic review out repo by repo; `.codereview.yml` can't switch a repo to the costlier mode |
 | Agentic review falls back to diff review on any failure | A PR must never be left unreviewed because a clone, the model or the tool loop failed; the agent gets `_AGENTIC_EXTRA_SECONDS` on top so the fallback keeps the regular time budget |
-| Mirrors read via `git show`/`git grep <sha>`, no worktrees | Nothing to check out or clean up; concurrent reviews read the same mirror safely; only clone/fetch take a file lock |
+| Agent reads the server's `/opt/projects` snapshots, read-only, with the PR's changed files laid on top | No clones or history on disk; the folder is shared with docs generation and a cron, so the bot never fetches or checks out there. Repos not in it are not reviewed agentically |
+| Bot's own depth-1 clone for other target branches (`demo-dev`, …), re-cloned and swapped | The shared snapshot is the main branch only; a fresh shallow clone keeps no history and readers never see a half-written folder |
 | Own tool loop instead of an agent SDK | Must run on GLM (OpenAI-compatible) as well as Claude |
 | Shadow review is a separate Celery task | It can fail or time out without touching the posted review's build status (the failure signals are bound to `process_review` only) |
 | Deadline taken at task start | Time spent fetching, in Semgrep and in the agent counts against the soft limit, so the fallback never runs past it |

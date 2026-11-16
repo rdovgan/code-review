@@ -323,18 +323,21 @@ projects:
 | `agentic` | Agentic review; on **any** failure (repo not cloned, git error, model error, no valid answer, out of time or budget) the standard review runs instead, with a note in the summary | the diff is re-sent on every step — several times a diff review |
 | `shadow` | Standard review. An agentic review runs afterwards as a separate task and is only recorded, for comparison | diff + agentic |
 
-How it works:
-- The worker keeps bare git mirrors in the `repo_mirrors` volume (`REPO_MIRRORS_DIR`, default `/repos`). Code is read straight from git objects at the PR's head commit — no checkouts. Clone credentials are the ones in `config/credentials.yml`; Bitbucket access tokens need read access to the repository.
-- The agent has `read_file`, `grep`, `find_files` and `list_dir`, limited by `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` and time. When a limit is hit it is asked for its answer.
-- An agentic repo's review task gets 600 extra seconds; the regular time budget stays reserved for the fallback.
-- Fork PRs fall back (the head commit is not in the mirror). Diffs above 3 × `AGENT_MAX_DIFF_TOKENS` fall back too.
-- Context repos are only fetched during reviews, never cloned. Clone them once (below), or the agent works without them.
+Where the code comes from:
+- **Shared snapshots** — `/opt/projects/<repo-slug>` on the server, mounted read-only at `/projects` (`PROJECTS_SNAPSHOT_DIR`): shallow clones of each repo's main branch, kept current by a cron job outside the bot. The bot never fetches, checks out or cleans there. **A repo that is not in this folder is never reviewed agentically** (`agentic` falls back, `shadow` records a failure).
+- **The PR's own files** are laid over the snapshot: files changed in the PR are read at the PR's head commit through the platform API (the ones in the reviewed diff are already fetched; others on first read), files it deletes or renames away are hidden. The agent sees the code as it is with the PR applied, nobody checks out the PR branch. Unchanged files are as old as the snapshot (up to a day) — fine for finding callers and definitions.
+- **Other target branches.** When a PR targets a branch the shared snapshot is not on (`demo-dev`, `demo-stable`, …), the bot keeps its own depth-1, single-branch clone of that branch in the `branch_snapshots` volume (`BRANCH_SNAPSHOT_DIR`). It is re-cloned when older than `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6) and swapped in, so no history accumulates. Clone credentials are the ones in `config/credentials.yml`.
+- **Context repos** are read from the shared snapshots as they are; those not in the folder are skipped.
 
-**Pre-clone big repos.** A repo is cloned on its first agentic review, inside that review's time budget. A large repo will not fit: the review falls back, and clones are not retried for an hour. Clone such repos — and every context repo — once by hand:
+Limits: the agent has `read_file`, `grep`, `find_files` and `list_dir`, bounded by `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` and time; when a limit is hit it is asked for its answer. An agentic repo's review task gets 600 extra seconds, and the regular time budget stays reserved for the fallback. Diffs above 3 × `AGENT_MAX_DIFF_TOKENS` fall back.
+
+**Pre-create big branch snapshots.** A branch snapshot is cloned on the first agentic review of a PR into that branch, inside that review's time budget. If a big repo does not fit, the review falls back and the clone is not retried for an hour. Create it once by hand:
 
 ```bash
-docker compose exec worker python -m app.context.repo_mirror bitbucket myworkspace/my-backend
+docker compose exec worker python -m app.context.snapshots bitbucket myworkspace/my-backend demo-dev
 ```
+
+The container user (uid 1000) must be able to read `/opt/projects` — world-readable files, as `git clone` creates them by default, are enough.
 
 **Shadow results.** Each shadow run stores what was posted and what the agent found (30 days):
 
@@ -427,8 +430,10 @@ AI_FILE_CONTEXT_MAX_CHARS=120000
 AI_PR_CONTEXT_MAX_CHARS=40000
 
 # Agentic review (review_mode: agentic | shadow) — defaults shown
-# REPO_MIRRORS_DIR=/repos
-# REPO_SYNC_TIMEOUT=900
+# PROJECTS_SNAPSHOT_DIR=/projects          # /opt/projects, mounted read-only in docker-compose.yml
+# BRANCH_SNAPSHOT_DIR=/repos
+# BRANCH_SNAPSHOT_MAX_AGE_HOURS=6
+# BRANCH_SNAPSHOT_CLONE_TIMEOUT=900
 # AGENT_MAX_DIFF_TOKENS=30000
 # AGENT_MAX_TOKENS_PER_REVIEW=800000
 # AGENT_TOOL_RESULT_MAX_CHARS=12000

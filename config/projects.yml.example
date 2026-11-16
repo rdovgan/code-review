@@ -26,7 +26,7 @@
 #   notify_authors: []             # PR authors that trigger a Mattermost message
 #   review_mode: diff              # diff | agentic | shadow — set here only, not in .codereview.yml
 #   agent_max_steps: 20            # agentic: code lookups per review part
-#   context_repos: []              # agentic: other repos the agent may search (pre-clone them)
+#   context_repos: []              # agentic: other repos the agent may search (must be in /opt/projects)
 
 # Shared settings can be reused with a YAML anchor:
 x-team-notify: &team_notify

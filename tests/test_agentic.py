@@ -10,7 +10,7 @@ from app.adapters.base import GitCloneSpec
 from app.analyzers.agent_reviewer import AgentReviewer, AgentReviewFailed
 from app.config.settings import Settings
 from app.context.code_tools import CodeTools, RepoView
-from app.context.repo_mirror import RepoMirror, RepoUnavailable
+from app.context.snapshots import BranchSnapshot, SnapshotUnavailable, current_branch, shared_snapshot
 from app.models import Finding, PRContext, ReviewConfig, Severity
 
 DIFF = (
@@ -20,118 +20,187 @@ DIFF = (
 )
 
 
-# --- a real git repo to mirror ---
+# --- real shallow snapshots ---
 
 def _git(cwd, *args):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True,
                    capture_output=True)
 
 
+def _head(cwd):
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True).stdout.strip()
+
+
 @pytest.fixture
 def source_repo(tmp_path):
-    src = tmp_path / "src-repo"
+    """The 'remote': master, plus a demo-dev branch that differs."""
+    src = tmp_path / "origin" / "repo"
     (src / "src" / "dto").mkdir(parents=True)
     (src / "src" / "BookingService.java").write_text(
         "class BookingService {\n  int total(Booking b) { return b.nights() * b.rate(); }\n}\n")
     (src / "src" / "dto" / "Booking.java").write_text(
         "class Booking {\n  int nights() { return Math.max(1, n); }\n  int rate() { return r; }\n}\n")
+    (src / "src" / "Legacy.java").write_text("class Legacy {}\n")
     _git(src, "init", "-q", "-b", "master")
     _git(src, "add", ".")
     _git(src, "commit", "-q", "-m", "init")
-    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src, capture_output=True, text=True).stdout.strip()
-    return src, sha
+    _git(src, "checkout", "-q", "-b", "demo-dev")
+    (src / "src" / "DemoOnly.java").write_text("class DemoOnly {}\n")
+    _git(src, "add", ".")
+    _git(src, "commit", "-q", "-m", "demo")
+    _git(src, "checkout", "-q", "master")
+    return src
 
 
 @pytest.fixture
-def mirror(tmp_path, source_repo):
-    src, sha = source_repo
-    m = RepoMirror(str(tmp_path / "mirrors"), "bitbucket", "ws/repo", GitCloneSpec(url=str(src)), timeout=60)
-    m.ensure_commit(sha)
-    return m, sha
+def projects_dir(tmp_path, source_repo):
+    """Like the server's /opt/projects: depth-1 clones of master, named by repo slug."""
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    subprocess.run(["git", "clone", "-q", "--depth", "1", "--branch", "master", f"file://{source_repo}",
+                    str(projects / "repo")], check=True, capture_output=True)
+    return projects
 
 
-def test_mirror_clones_and_fetches_new_commits(mirror, source_repo):
-    m, sha = mirror
-    src, _ = source_repo
-    assert m.has_commit(sha)
-    (src / "NEW.md").write_text("x")
-    _git(src, "add", ".")
-    _git(src, "commit", "-q", "-m", "second")
-    new_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src, capture_output=True, text=True).stdout.strip()
-    assert not m.has_commit(new_sha)
-    m.ensure_commit(new_sha)
-    assert m.has_commit(new_sha)
+def test_shared_snapshot_is_found_by_repo_slug(projects_dir):
+    assert shared_snapshot(str(projects_dir), "ws/repo") == projects_dir / "repo"
+    assert shared_snapshot(str(projects_dir), "ws/not-there") is None
+    assert shared_snapshot("", "ws/repo") is None
+    assert current_branch(projects_dir / "repo") == "master"
 
 
-def test_mirror_missing_commit_raises(mirror):
-    m, _ = mirror
-    with pytest.raises(RepoUnavailable, match="not found"):
-        m.ensure_commit("0" * 40)
+def _branch_snapshot(tmp_path, source_repo, branch="demo-dev", max_age=3600, url=None):
+    return BranchSnapshot(str(tmp_path / "bot-snapshots"), "ws/repo", branch,
+                          GitCloneSpec(url=url or f"file://{source_repo}"), max_age_seconds=max_age, timeout=60)
 
 
-def test_failed_clone_is_not_retried_right_away(tmp_path):
-    m = RepoMirror(str(tmp_path / "mirrors"), "bitbucket", "ws/missing",
-                   GitCloneSpec(url=str(tmp_path / "does-not-exist")), timeout=30)
-    with pytest.raises(RepoUnavailable, match="clone failed"):
-        m.ensure_commit("a" * 40)
-    with pytest.raises(RepoUnavailable, match="last clone failed"):
-        m.ensure_commit("a" * 40)
+def test_branch_snapshot_is_a_shallow_clone_of_that_branch(tmp_path, source_repo):
+    path = _branch_snapshot(tmp_path, source_repo).ensure()
+    assert path.name == "repo@demo-dev"
+    assert (path / "src" / "DemoOnly.java").exists()
+    assert current_branch(path) == "demo-dev"
+    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=path, capture_output=True, text=True)
+    assert shallow.stdout.strip() == "true"
 
 
-def test_context_repos_are_never_cloned_during_a_review(tmp_path, source_repo):
-    src, _ = source_repo
-    m = RepoMirror(str(tmp_path / "mirrors"), "bitbucket", "ws/other", GitCloneSpec(url=str(src)), timeout=30)
-    with pytest.raises(RepoUnavailable, match="not cloned yet"):
-        m.ensure_fresh()
-    assert not m.path.exists()
+def test_branch_snapshot_refresh_reclones_and_keeps_no_history(tmp_path, source_repo):
+    snap = _branch_snapshot(tmp_path, source_repo, max_age=0)
+    path = snap.ensure()
+    _git(source_repo, "checkout", "-q", "demo-dev")
+    (source_repo / "src" / "Newer.java").write_text("class Newer {}\n")
+    _git(source_repo, "add", ".")
+    _git(source_repo, "commit", "-q", "-m", "newer")
+    snap.ensure()
+    assert (path / "src" / "Newer.java").exists()
+    count = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=path, capture_output=True, text=True)
+    assert count.stdout.strip() == "1"  # depth 1 every time: history never accumulates
+    assert not path.with_name(path.name + ".old").exists() and not path.with_name(path.name + ".new").exists()
 
 
-def test_clone_credentials_go_to_a_header_not_the_url():
+def test_fresh_branch_snapshot_is_not_recloned(tmp_path, source_repo):
+    snap = _branch_snapshot(tmp_path, source_repo)
+    snap.ensure()
+    with patch("app.context.snapshots.subprocess.run") as run:
+        snap.ensure()
+    run.assert_not_called()
+
+
+def test_failed_branch_clone_is_not_retried_right_away(tmp_path, source_repo):
+    snap = _branch_snapshot(tmp_path, source_repo, branch="no-such-branch")
+    with pytest.raises(SnapshotUnavailable, match="failed"):
+        snap.ensure()
+    with pytest.raises(SnapshotUnavailable, match="last clone failed"):
+        snap.ensure()
+
+
+def test_outdated_branch_snapshot_is_used_when_refresh_fails(tmp_path, source_repo):
+    path = _branch_snapshot(tmp_path, source_repo).ensure()
+    broken = _branch_snapshot(tmp_path, source_repo, max_age=0, url=str(tmp_path / "gone"))
+    assert broken.ensure() == path
+    assert (path / "src" / "DemoOnly.java").exists()
+
+
+def test_clone_credentials_go_to_a_header_not_the_url(tmp_path):
     spec = GitCloneSpec(url="https://bitbucket.org/ws/repo.git", username="x-token-auth", password="s3cret")
-    env = RepoMirror("/tmp", "bitbucket", "ws/repo", spec)._env()
+    env = BranchSnapshot(str(tmp_path), "ws/repo", "demo-dev", spec, max_age_seconds=1)._env()
     assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
     assert env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
     assert "s3cret" not in repr(spec)
 
 
-# --- code tools ---
+# --- code tools over a snapshot with the PR laid on top ---
+
+PR_SERVICE = "class BookingService {\n  int total(Booking b) { return b.nights() * b.rate() + fee(); }\n}\n"
+
 
 @pytest.fixture
-def tools(mirror):
-    m, sha = mirror
-    return CodeTools([RepoView("ws/repo", m.path, sha, "the PR's repository")])
+def tools(projects_dir):
+    fetched = []
+
+    def fetch(path):
+        fetched.append(path)
+        return "class Added {\n  int rate() { return 2; }\n}\n" if path == "src/Added.java" else None
+
+    view = RepoView("ws/repo", projects_dir / "repo", "the PR's repository",
+                    overlay={"src/BookingService.java": PR_SERVICE, "src/Legacy.java": None},
+                    lazy_paths={"src/Added.java"}, fetch=fetch)
+    t = CodeTools([view, RepoView("ws/core", projects_dir / "repo", "related repository")])
+    t.fetched = fetched
+    return t
 
 
-def test_read_file_is_line_numbered_and_ranged(tools):
+def test_read_file_returns_the_pr_version_of_changed_files(tools):
+    assert "+ fee()" in tools.run("read_file", {"path": "src/BookingService.java"})
     out = tools.run("read_file", {"path": "src/dto/Booking.java", "start_line": 2, "end_line": 2})
-    assert "    2|   int nights() { return Math.max(1, n); }" in out
-    assert "int rate()" not in out
+    assert "    2|   int nights() { return Math.max(1, n); }" in out and "rate()" not in out
 
 
-def test_grep_finds_usages_without_rev_prefix(tools):
-    out = tools.run("grep", {"pattern": "nights\\(", "path_glob": "**/*.java"})
-    assert "src/BookingService.java:2:" in out
-    assert "src/dto/Booking.java:2:" in out
+def test_files_removed_by_the_pr_are_hidden(tools):
+    assert tools.run("read_file", {"path": "src/Legacy.java"}).startswith("ERROR: file not found")
+    assert "Legacy.java" not in tools.run("find_files", {"name_glob": "*.java"})
+    assert tools.run("grep", {"pattern": "class Legacy"}) == "no matches"
+
+
+def test_changed_files_not_prefetched_are_fetched_on_read(tools):
+    assert "return 2" in tools.run("read_file", {"path": "src/Added.java"})
+    tools.run("read_file", {"path": "src/Added.java"})
+    assert tools.fetched == ["src/Added.java"]  # cached after the first read
+    assert "src/Added.java" in tools.run("find_files", {"name_glob": "Added*"})
+
+
+def test_grep_searches_the_pr_version_of_changed_files(tools):
+    out = tools.run("grep", {"pattern": "rate\\(", "path_glob": "**/*.java"}).splitlines()
+    assert out == ["src/BookingService.java:2:  int total(Booking b) { return b.nights() * b.rate() + fee(); }",
+                   "src/dto/Booking.java:3:  int rate() { return r; }"]
+    assert tools.run("grep", {"pattern": "fee()", "fixed_string": True}).startswith("src/BookingService.java:2:")
     assert tools.run("grep", {"pattern": "doesNotExist"}) == "no matches"
 
 
-def test_find_files_and_list_dir(tools):
-    assert tools.run("find_files", {"name_glob": "Booking*.java"}).splitlines() == [
-        "src/BookingService.java", "src/dto/Booking.java"]
-    assert tools.run("list_dir", {"path": "src"}).splitlines() == ["BookingService.java", "dto/"]
+def test_context_repo_is_read_as_is(tools):
+    assert "+ fee()" not in tools.run("read_file", {"path": "src/BookingService.java", "repo": "ws/core"})
+    assert "src/Legacy.java" in tools.run("find_files", {"name_glob": "*.java", "repo": "ws/core"})
+
+
+def test_list_dir(tools):
+    assert tools.run("list_dir", {"path": "src"}).splitlines() == ["Added.java", "BookingService.java", "dto/"]
+    assert tools.run("list_dir", {}).splitlines() == ["src/"]
+
+
+def test_tools_cannot_leave_the_repository(tools):
+    for path in ("../../etc/passwd", ".git/config", "src/../../outside"):
+        assert tools.run("read_file", {"path": path}).startswith("ERROR: file not found"), path
 
 
 def test_tool_errors_are_returned_as_text(tools):
-    assert tools.run("read_file", {"path": "nope.java"}).startswith("ERROR: file not found")
     assert tools.run("read_file", {"path": "x", "repo": "ws/unknown"}).startswith("ERROR: unknown repo")
     assert tools.run("delete_everything", {}).startswith("ERROR: unknown tool")
     assert tools.run("grep", None).startswith("ERROR")
+    assert tools.run("list_dir", {"path": "nope"}).startswith("ERROR: directory not found")
     assert tools.calls == 4
 
 
-def test_tool_output_is_capped(mirror):
-    m, sha = mirror
-    capped = CodeTools([RepoView("ws/repo", m.path, sha, "")], max_result_chars=40)
+def test_tool_output_is_capped(projects_dir):
+    capped = CodeTools([RepoView("ws/repo", projects_dir / "repo", "")], max_result_chars=40)
     assert capped.run("read_file", {"path": "src/dto/Booking.java"}).endswith("[output truncated — narrow the request]")
 
 
@@ -445,10 +514,10 @@ def test_unknown_review_mode_falls_back_to_diff(tmp_path):
         assert project_config.central_review_mode("ws/repo") == "diff"
 
 
-def test_agent_end_to_end_on_a_real_mirror(tools):
-    """Real mirror and tools; only the model is mocked. The tool result the model gets is real code."""
+def test_agent_end_to_end_on_a_real_snapshot(tools):
+    """Real snapshot and tools; only the model is mocked. The tool result the model gets is real code."""
     agent = _agent()
-    responses = [_claude(_tool_use("t1", "grep", {"pattern": "int rate\\(", "path_glob": "**/*.java"})),
+    responses = [_claude(_tool_use("t1", "grep", {"pattern": "int rate\\(", "path_glob": "src/dto/**"})),
                  _claude(_text(FINDING))]
     with patch.object(agent._client.beta.messages, "create", side_effect=responses) as create:
         result = agent.review_agentic(_ctx(), ReviewConfig(), tools)
@@ -456,3 +525,51 @@ def test_agent_end_to_end_on_a_real_mirror(tools):
     assert tool_result == "src/dto/Booking.java:3:  int rate() { return r; }"
     assert len(result) == 1 and result.tool_calls == 1
     assert "ws/repo: the PR's repository" in create.call_args_list[0].kwargs["messages"][0]["content"]
+
+
+# --- worker: building the agent's view ---
+
+def test_agentic_needs_the_repo_in_the_projects_folder(projects_dir):
+    from app.workers import celery_app
+    with patch.object(celery_app.settings, "PROJECTS_SNAPSHOT_DIR", str(projects_dir)):
+        with pytest.raises(AgentReviewFailed, match="not in"):
+            celery_app._build_code_tools(MagicMock(), _ctx(repo_full_name="ws/elsewhere"), ReviewConfig(),
+                                         deadline=10**9, file_contents={}, raw_diff=DIFF)
+
+
+def test_pr_into_the_snapshot_branch_uses_the_shared_snapshot(projects_dir):
+    from app.workers import celery_app
+    adapter = MagicMock()
+    config = ReviewConfig(context_repos=["ws/repo", "ws/missing"])
+    with patch.object(celery_app.settings, "PROJECTS_SNAPSHOT_DIR", str(projects_dir)):
+        tools = celery_app._build_code_tools(adapter, _ctx(target_branch="master"), config, deadline=10**9,
+                                             file_contents={"src/BookingService.java": PR_SERVICE}, raw_diff=DIFF)
+    adapter.git_clone_spec.assert_not_called()  # nothing cloned
+    assert "+ fee()" in tools.run("read_file", {"path": "src/BookingService.java"})
+    assert "master (shared snapshot" in tools.describe()
+    assert "ws/missing" not in tools.describe()
+
+
+def test_pr_into_another_branch_gets_a_bot_snapshot_of_it(tmp_path, projects_dir, source_repo):
+    from app.workers import celery_app
+    adapter = MagicMock()
+    adapter.git_clone_spec.return_value = GitCloneSpec(url=f"file://{source_repo}")
+    with patch.object(celery_app.settings, "PROJECTS_SNAPSHOT_DIR", str(projects_dir)), \
+         patch.object(celery_app.settings, "BRANCH_SNAPSHOT_DIR", str(tmp_path / "bot")):
+        tools = celery_app._build_code_tools(adapter, _ctx(target_branch="demo-dev"), ReviewConfig(),
+                                             deadline=10**9, file_contents={}, raw_diff=DIFF)
+    assert "src/DemoOnly.java" in tools.run("find_files", {"name_glob": "DemoOnly*"})
+    assert not (projects_dir / "repo" / "src" / "DemoOnly.java").exists()  # shared snapshot untouched
+    assert current_branch(projects_dir / "repo") == "master"
+
+
+def test_pr_overlay_hides_deleted_and_renamed_away_files():
+    from app.workers import celery_app
+    raw = ("diff --git a/src/Old.java b/src/New.java\nsimilarity index 90%\nrename from src/Old.java\n"
+           "rename to src/New.java\n@@ -1 +1 @@\n-a\n+b\n"
+           "diff --git a/src/Gone.java b/src/Gone.java\ndeleted file mode 100644\n--- a/src/Gone.java\n"
+           "+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+    ctx = _ctx(changed_files=["src/New.java", "src/Big.java"])
+    overlay, lazy = celery_app._pr_overlay(ctx, raw, {"src/New.java": "b\n"})
+    assert overlay == {"src/Old.java": None, "src/New.java": "b\n", "src/Gone.java": None}
+    assert lazy == {"src/Big.java"}

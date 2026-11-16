@@ -1,1018 +1,264 @@
 # Code Review Bot
 
-An automated code review bot that integrates with Bitbucket and runs on every pull request. It combines static analysis (Semgrep) and AI review (Claude) to catch security vulnerabilities, bugs, and performance issues before code is merged.
+Reviews every pull request automatically: Semgrep static analysis plus an AI review (Claude or GLM). Findings are posted as inline comments and a summary, and the build status can block the merge.
 
----
+Works with Bitbucket Cloud (main platform), GitHub and GitLab. Languages: Java, JS/TS, C#, PHP, Python.
 
-## What it does
+## How it works
 
-When a PR is opened or updated in Bitbucket, the bot:
+```mermaid
+flowchart TD
+    PR(["PR opened / updated<br/>or comment 'review'"]) --> WH["Webhook → FastAPI<br/>check signature, reply 202"]
+    WH --> Q[("Redis queue")]
+    Q --> W["Celery worker"]
+    W --> SKIP{"Target branch in<br/>target_branches?"}
+    SKIP -- no --> END0(["Skipped"])
+    SKIP -- yes --> PREP["Fetch diff + changed files<br/>drop ignored / deleted / binary<br/>cut at max_diff_lines"]
+    PREP --> CTX["PR context: description, commits,<br/>Jira ticket, repo CLAUDE.md"]
+    CTX --> SG["Semgrep"]
+    SG --> SGV["AI re-checks Semgrep findings"]
+    SGV --> MODE{"review_mode"}
 
-1. Runs **Semgrep** static analysis to detect security vulnerabilities and common bugs
-2. If Semgrep finds no issues, runs **Claude AI** review for deeper analysis
-3. Posts **inline comments** on the changed lines with findings
-4. Posts a **summary comment** at the top of the PR
-5. Sets the **build status** to pass or fail — blocking merge if critical issues are found
+    MODE -- "diff / shadow" --> DIFF["AI review of the diff<br/>+ second AI pass drops unproven findings"]
+    MODE -- agentic --> AG["Agent reads the repository<br/>(/opt/projects snapshot + PR files)<br/>grep, read_file, … then reports"]
+    AG -- "any failure" --> DIFF
+    AG -- ok --> MERGE
+    DIFF --> MERGE["Merge: one finding per file:line,<br/>higher severity wins"]
 
----
+    MERGE --> POST["Replace old bot comments:<br/>inline comments + summary"]
+    POST --> STATUS["Build status<br/>FAILED / STOPPED / SUCCESSFUL"]
+    STATUS --> MM["Mattermost (new PRs of notify_authors)"]
+    STATUS -. "shadow only" .-> SH["Background task: agentic review,<br/>recorded in Redis, never posted"]
+```
 
-## Key Features
+In short: the worker prepares the diff and the PR's context, runs Semgrep and the AI review (each finding double-checked by the AI), merges the results and posts them.
 
-- **Static analysis** — Semgrep with OWASP Top 10, security audit, and language-specific rule packs
-- **AI review** — Claude analyzes the diff for security, bugs, and performance issues
-- **Inline comments** — findings are posted directly on the relevant lines in the PR
-- **Merge blocking** — PRs with critical findings get a `FAILED` build status
-- **Multi-language** — Java, JavaScript/TypeScript, C#, PHP (auto-detected from file extensions)
-- **Per-project config** — each repo can have its own rules, ignored paths, and severity thresholds
-- **Repo-level overrides** — teams can place a `.codereview.yml` in their repo to override central settings
-- **Deduplication** — re-running a review cleans up old comments before posting fresh ones
-- **Monitoring** — Prometheus metrics + Grafana dashboard with per-language, per-project, and per-author stats
+| Severity | Meaning | Posted as |
+|----------|---------|-----------|
+| `CRITICAL` | Exploitable security hole, data loss | inline + summary; blocks merge by default |
+| `BUG` | Incorrect behavior with a concrete scenario | inline + summary |
+| `PERFORMANCE` | Real cost on a realistic path (N+1, blocking I/O) | inline + summary |
+| `SUGGEST` | Removes a concrete future risk | summary only |
 
----
+Build status: `FAILED` if a finding matches `block_merge_on`, `STOPPED` if the AI reviewed nothing (budget or API failure), otherwise `SUCCESSFUL`.
 
-## Severity Levels
+**Re-run a review:** push a commit, or comment `review` on the PR. Old bot comments are replaced.
 
-| Level | Meaning | Blocks merge |
-|-------|---------|-------------|
-| `CRITICAL` | Security vulnerability (injection, auth bypass, RCE, data leak) | Yes |
-| `BUG` | Logic error, null dereference, resource leak, race condition | No |
-| `PERFORMANCE` | N+1 queries, blocking I/O, allocations in hot paths | No |
-| `SUGGEST` | Naming, readability, best practices | No |
+**Review modes** (per repo, see [Review modes](#review-modes)): `diff` — the AI sees the diff and changed files; `agentic` — the AI also reads the repository with tools; `shadow` — `diff` is posted, `agentic` runs in the background for comparison.
 
----
+## Setup
 
-## Tech Stack
+Requirements: a Linux server with Docker + Compose plugin, a domain with HTTPS (Nginx + Let's Encrypt), 2+ vCPU, 4+ GB RAM.
 
-| Component | Technology |
-|-----------|-----------|
-| API server | FastAPI |
-| Task queue | Celery + Redis |
-| Static analysis | Semgrep OSS |
-| AI review | Anthropic Claude API |
-| Git platform | Bitbucket Cloud |
-| Monitoring | Prometheus + Grafana |
-| Deployment | Docker Compose |
-
----
-
-## Quick Start
+### 1. Get the code and configure
 
 ```bash
-# 1. Copy and fill in your credentials
-cp .env.example .env
-
-# 2. Register your first project (the file is instance-specific and git-ignored)
-cp config/projects.yml.example config/projects.yml
-nano config/projects.yml
-
-# 3. Start everything
-docker compose up --build -d
+git clone <repo-url> /opt/code-review && cd /opt/code-review
+cp .env.example .env                                     # AI keys, budget, optional Jira/Mattermost
+cp config/credentials.yml.example config/credentials.yml # platform tokens + webhook secrets
+cp config/projects.yml.example config/projects.yml       # which repos to review, and how
+chmod 600 .env config/credentials.yml
 ```
 
----
+`.env`, `config/credentials.yml` and `config/projects.yml` are git-ignored: each instance keeps its own. Back them up.
 
-## Managing Projects
+**`.env`** — main variables (full list with defaults: `app/config/settings.py`):
 
-The bot uses a two-layer config system. For each PR, settings are resolved in this order:
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AI_PROVIDER` | `claude` | `claude` or `glm` |
+| `ANTHROPIC_API_KEY`, `AI_MODEL` | —, `claude-sonnet-5-5` | Claude |
+| `ZAI_API_KEY`, `GLM_MODEL` | —, `glm-5-turbo` | GLM (Z.AI) |
+| `AI_DAILY_TOKEN_BUDGET` | `10000000` | Input+output tokens per day; `0` = unlimited. When reached, reviews get `STOPPED` |
+| `AI_MAX_DIFF_TOKENS` | `60000` | Diff per AI request; bigger diffs are split by whole files |
+| `AI_MAX_TOKENS` | `16000` | Max AI answer (incl. thinking) |
+| `AI_FILE_CONTEXT_MAX_CHARS` | `120000` | Full changed files sent with the diff; `0` disables |
+| `AI_PR_CONTEXT_MAX_CHARS` | `40000` | PR description + commits + Jira ticket + repo guide; `0` disables |
+| `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | empty | Optional. Ticket key is taken from the branch name or PR title. Use a read-only account or a token with the `read:jira-work` scope |
+| `MATTERMOST_WEBHOOK_URL` | empty | Optional. Message on new PRs by authors listed in `notify_authors` |
+| `REDIS_PASSWORD` | — | Set your own |
 
-```
-System defaults
-      ↓
-config/projects.yml    ← central registry, managed on the VPS
-      ↓
-.codereview.yml        ← optional file in the repo root (overrides central)
-```
+Agentic review settings are in [Review modes](#review-modes).
 
-You can onboard a project by editing `config/projects.yml` alone — no changes to the repo are required.
+**`config/credentials.yml`** — per workspace or per repo: an API token (Bitbucket: repository or workspace access token with **Repositories: Read**, **Pull requests: Read, Write**) and a `webhook_secret` (`openssl rand -hex 32`). The example file shows every option, including GitHub and GitLab.
 
-`config/projects.yml` is not in git: every instance of the bot keeps its own registry on its server. Start from `config/projects.yml.example`, which lists every field with its default. Back it up together with `config/credentials.yml`.
-
-### Adding a Project
-
-#### Step 1 — Register in config/projects.yml
-
-SSH into the VPS and add an entry. The key is the Bitbucket repo full name: `workspace/repository-slug`.
+### 2. Start
 
 ```bash
-nano ~/code-review/config/projects.yml
-```
-
-Minimal entry — language auto-detected, everything else at defaults:
-
-```yaml
-projects:
-  myworkspace/my-service:
-    language: java
-```
-
-Full entry:
-
-```yaml
-projects:
-  myworkspace/my-service:
-    language: java
-    ai_review: true
-    static_analysis: true
-    block_merge_on:
-      - CRITICAL
-    max_diff_lines: 500
-    ignore_paths:
-      - "migrations/*"
-      - "**/*.generated.java"
-    semgrep_rules:
-      - owasp
-      - security-audit
-      - p/java
-    ai_focus:
-      - security
-      - bugs
-```
-
-No restart needed — the file is read on every review task.
-
-#### Step 2 — Add credentials in config/credentials.yml
-
-```bash
-nano ~/code-review/config/credentials.yml
-```
-
-Generate a webhook secret for the repo:
-```bash
-openssl rand -hex 32
-```
-
-**Use whichever token type your Bitbucket plan allows:**
-
-**Repository Access Token** (per-repo — most common):
-- Repository → **Settings → Security → Access tokens → Create access token**
-- Scopes: **Repositories: Read** | **Pull requests: Read, Write**
-
-```yaml
-bitbucket:
-  workspaces:
-    myworkspace:
-      repositories:
-        my-service:
-          api_token: ATBBxxxxxxxxxxxx      # Repository Access Token
-          webhook_secret: aabbccdd...
-```
-
-**Workspace Access Token** (one token covers all repos in the workspace):
-- Workspace → **Settings → Security → Access tokens → Create access token**
-
-```yaml
-bitbucket:
-  workspaces:
-    myworkspace:
-      api_token: ATBBxxxxxxxxxxxx          # Workspace Access Token
-      repositories:
-        my-service:
-          webhook_secret: aabbccdd...
-        other-service:
-          webhook_secret: 11223344...
-```
-
-**App Password** (legacy, still works):
-- Profile avatar → **Personal settings → App Passwords**
-
-```yaml
-bitbucket:
-  workspaces:
-    myworkspace:
-      username: alice
-      app_password: ATBBxxxxxxxxxxxx
-      repositories:
-        my-service:
-          webhook_secret: aabbccdd...
-```
-
-No restart needed — credentials are read on every request.
-
-#### Step 3 — Add the Webhook in Bitbucket
-
-1. Open the repository → **Repository Settings → Webhooks → Add webhook**
-2. Fill in:
-   - **Title:** `Code Review Bot`
-   - **URL:** `https://yourdomain.com/webhook/bitbucket`
-   - **Secret:** the `webhook_secret` value for this workspace from `config/credentials.yml`
-   - **Status:** Active
-3. Triggers: **Pull request: Created** and **Pull request: Updated**
-4. Save, then click **Test connection** — should return HTTP 200
-
-#### Step 4 — Open a Test PR
-
-Create a branch, open a PR. Within a few seconds:
-- Build status → `INPROGRESS`
-- Semgrep + AI run in parallel
-- Inline comments appear on changed lines
-- Summary comment posted at the PR top
-- Build status → `SUCCESSFUL` or `FAILED` (if CRITICAL findings exist)
-
-If nothing appears after 30 seconds: `docker compose logs --tail=50 worker`
-
-### Removing a Project
-
-1. Delete the entry from `config/projects.yml`
-2. Delete the webhook in Bitbucket: **Repository Settings → Webhooks → Delete**
-
-### Config Field Reference
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `language` | string | `auto` | `java`, `dotnet`, `php`, `js`, `python`, or `auto` (detects from file extensions) |
-| `ai_review` | bool | `true` | Run the Claude AI analyzer |
-| `static_analysis` | bool | `true` | Run Semgrep |
-| `semgrep_ai_verify` | bool | `true` | Re-check each Semgrep finding with AI and drop ones judged to be false positives before posting (fails open — keeps findings unfiltered if verification errors out) |
-| `ai_verify` | bool | `true` | Second AI pass that tries to refute each AI finding on the same material and drops the refuted ones (fails open). Roughly doubles AI cost for requests that produced findings |
-| `ai_context_files` | list | `[CLAUDE.md]` | Repo files read at the target branch and sent to the AI as the project's conventions. Missing files are skipped |
-| `review_mode` | string | `diff` | `diff`, `agentic` or `shadow` — see [Agentic Review](#agentic-review). Central config only |
-| `agent_max_steps` | int | `20` | Max code lookups (tool calls) per agentic review part. Central config only |
-| `context_repos` | list | `[]` | Other repos (same platform/workspace) the agent may search, at their default branch. Central config only |
-| `block_merge_on` | list | `[CRITICAL]` | Severity levels that set build status to FAILED |
-| `max_diff_lines` | int | `500` | Max diff lines analyzed (ignored files excluded first); the rest is cut at file/hunk boundaries and listed in the summary |
-| `ignore_paths` | list | `[]` | Glob patterns — matching files produce no findings |
-| `semgrep_rules` | list | `[owasp, security-audit]` | Rule packs: `owasp`, `security-audit`, `p/java`, `p/csharp`, `p/php`, `p/javascript`, `p/python`, `p/django`, `p/flask` |
-| `ai_focus` | list | `[security, bugs]` | What the team wants the AI to concentrate on: `security`, `bugs`, `performance`, or free text (e.g. `billing rules`) |
-| `target_branches` | list | `[master, main]` | Only review PRs targeting these branches |
-| `slack_channel` | string | `""` | Slack channel for notifications (Phase 3, not yet active) |
-
-### Quick Reference Configs by Language
-
-**Java / Spring Boot**
-```yaml
-myworkspace/spring-api:
-  language: java
-  ignore_paths: ["migrations/*", "**/*.generated.java", "src/test/*"]
-  semgrep_rules: [owasp, security-audit, p/java]
-```
-
-**React / TypeScript**
-```yaml
-myworkspace/react-app:
-  language: js
-  ignore_paths: ["dist/*", "build/*", "**/*.min.js", "node_modules/*"]
-  semgrep_rules: [owasp, p/javascript]
-```
-
-**C# / ASP.NET**
-```yaml
-myworkspace/dotnet-service:
-  language: dotnet
-  block_merge_on: [CRITICAL, BUG]
-  ignore_paths: ["**/Migrations/*", "**/*.Designer.cs", "**/*.g.cs"]
-  semgrep_rules: [owasp, p/csharp]
-```
-
-**PHP / Laravel**
-```yaml
-myworkspace/laravel-app:
-  language: php
-  ignore_paths: ["vendor/*", "storage/*", "bootstrap/cache/*"]
-  semgrep_rules: [owasp, p/php]
-```
-
-**Python / Django**
-```yaml
-myworkspace/django-api:
-  language: python
-  ignore_paths: ["migrations/*", "**/*_test.py", "tests/*"]
-  semgrep_rules: [owasp, security-audit, p/python, p/django]
-```
-
-**Python / Flask**
-```yaml
-myworkspace/flask-service:
-  language: python
-  ignore_paths: ["tests/*", "**/*_test.py"]
-  semgrep_rules: [owasp, security-audit, p/python, p/flask]
-```
-
-**Legacy / large repo (lenient mode)**
-```yaml
-myworkspace/legacy-monolith:
-  language: java
-  static_analysis: false
-  block_merge_on: []
-  max_diff_lines: 1000
-  ignore_paths: ["legacy/*", "generated/*"]
-  ai_focus: [security]
-```
-
-### Per-Repo Override (.codereview.yml)
-
-Teams can place a `.codereview.yml` in their repo root to override central settings. It is read from the PR's **base branch** on every review, so changes take effect on the next PR without any bot restart.
-
-`review_mode`, `agent_max_steps` and `context_repos` are the exception: they change cost and worker load, so only `config/projects.yml` can set them. The bot ignores them in `.codereview.yml` and logs a warning.
-
-### Agentic Review
-
-By default (`review_mode: diff`) the AI sees the diff, the changed files and the PR context. With `review_mode: agentic` it also reads the repository: a tool loop lets the model grep for callers, open definitions and check guards before it reports a finding — the main source of irrelevant findings in diff-only review is code the model never saw.
-
-```yaml
-projects:
-  myworkspace/my-backend:
-    review_mode: agentic       # diff | agentic | shadow
-    agent_max_steps: 20        # code lookups per review part
-    context_repos:             # also searchable, at their default branch
-      - myworkspace/shared-core
-```
-
-| Mode | What gets posted | Cost |
-|------|------------------|------|
-| `diff` | Standard review | 1× |
-| `agentic` | Agentic review; on **any** failure (repo not cloned, git error, model error, no valid answer, out of time or budget) the standard review runs instead, with a note in the summary | the diff is re-sent on every step — several times a diff review |
-| `shadow` | Standard review. An agentic review runs afterwards as a separate task and is only recorded, for comparison | diff + agentic |
-
-Where the code comes from:
-- **Shared snapshots** — `/opt/projects/<repo-slug>` on the server, mounted read-only at `/projects` (`PROJECTS_SNAPSHOT_DIR`): shallow clones of each repo's main branch, kept current by a cron job outside the bot. The bot never fetches, checks out or cleans there. **A repo that is not in this folder is never reviewed agentically** (`agentic` falls back, `shadow` records a failure).
-- **The PR's own files** are laid over the snapshot: files changed in the PR are read at the PR's head commit through the platform API (the ones in the reviewed diff are already fetched; others on first read), files it deletes or renames away are hidden. The agent sees the code as it is with the PR applied, nobody checks out the PR branch. Unchanged files are as old as the snapshot (up to a day) — fine for finding callers and definitions.
-- **Other target branches.** When a PR targets a branch the shared snapshot is not on (`demo-dev`, `demo-stable`, …), the bot keeps its own depth-1, single-branch clone of that branch in the `branch_snapshots` volume (`BRANCH_SNAPSHOT_DIR`). It is re-cloned when older than `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6) and swapped in, so no history accumulates. Clone credentials are the ones in `config/credentials.yml`.
-- **Context repos** are read from the shared snapshots as they are; those not in the folder are skipped.
-
-Limits: the agent has `read_file`, `grep`, `find_files` and `list_dir`, bounded by `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` and time; when a limit is hit it is asked for its answer. An agentic repo's review task gets 600 extra seconds, and the regular time budget stays reserved for the fallback. Diffs above 3 × `AGENT_MAX_DIFF_TOKENS` fall back.
-
-**Pre-create big branch snapshots.** A branch snapshot is cloned on the first agentic review of a PR into that branch, inside that review's time budget. If a big repo does not fit, the review falls back and the clone is not retried for an hour. Create it once by hand:
-
-```bash
-docker compose exec worker python -m app.context.snapshots bitbucket myworkspace/my-backend demo-dev
-```
-
-The container user (uid 1000) must be able to read `/opt/projects` — world-readable files, as `git clone` creates them by default, are enough.
-
-**Shadow results.** Each shadow run stores what was posted and what the agent found (30 days):
-
-```bash
-docker compose exec worker python scripts/shadow_report.py --details
-```
-
-`agent only` findings are what the diff review missed; `posted only` ones are what the agent did not confirm. Metrics: `code_review_agentic_total{result="ok|fallback|shadow_ok|shadow_failed"}`.
-
-### Re-running the Review
-
-Push a new commit to the PR branch. The bot will delete its previous comments, re-run the full analysis, and post fresh results.
-
----
-
-## Deployment Guide
-
-Target: Ubuntu 22.04/24.04 LTS, Docker Compose stack, HTTPS via Nginx + Let's Encrypt.
-
-**Recommended VPS specs:** 4 vCPU, 8 GB RAM, 80 GB SSD
-**Minimum:** 2 vCPU, 4 GB RAM, 40 GB SSD
-
-### 1. Server Preparation
-
-```bash
-# Log in as root, then:
-
-# Update system
-apt update && apt upgrade -y
-
-# Install Docker
-curl -fsSL https://get.docker.com | sh
-
-# Install Docker Compose plugin and Nginx + Certbot
-apt install -y docker-compose-plugin nginx certbot python3-certbot-nginx
-
-# Verify
-docker --version
-docker compose version
-nginx -v
-```
-
-### 2. Create App User
-
-Run the bot as a non-root user with Docker access.
-
-```bash
-useradd -m -s /bin/bash deploy
-usermod -aG docker deploy
-```
-
-All subsequent steps are run as the `deploy` user unless noted otherwise.
-
-```bash
-su - deploy
-```
-
-### 3. Upload Application Files
-
-```bash
-mkdir -p ~/code-review
-cd ~/code-review
-```
-
-From your local machine:
-```bash
-rsync -av --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
-  ./ deploy@YOUR_VPS_IP:~/code-review/
-```
-
-Or from git:
-```bash
-git clone https://your-repo-url.git .
-```
-
-### 4. Configure Environment
-
-```bash
-cd ~/code-review
-cp .env.example .env
-nano .env
-```
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-AI_MODEL=claude-sonnet-5-5
-AI_MAX_TOKENS=16000
-AI_MAX_DIFF_TOKENS=60000
-AI_FILE_CONTEXT_MAX_CHARS=120000
-AI_PR_CONTEXT_MAX_CHARS=40000
-
-# Agentic review (review_mode: agentic | shadow) — defaults shown
-# PROJECTS_SNAPSHOT_DIR=/projects          # /opt/projects, mounted read-only in docker-compose.yml
-# BRANCH_SNAPSHOT_DIR=/repos
-# BRANCH_SNAPSHOT_MAX_AGE_HOURS=6
-# BRANCH_SNAPSHOT_CLONE_TIMEOUT=900
-# AGENT_MAX_DIFF_TOKENS=30000
-# AGENT_MAX_TOKENS_PER_REVIEW=800000
-# AGENT_TOOL_RESULT_MAX_CHARS=12000
-AI_DAILY_TOKEN_BUDGET=10000000
-
-# Optional: the Jira ticket whose key is in the source branch (or PR title) is sent to
-# the AI as the intent of the change. Read-only access is enough.
-JIRA_BASE_URL=https://your-org.atlassian.net
-JIRA_EMAIL=code-review-bot@your-org.com
-JIRA_API_TOKEN=...
-
-REDIS_URL=redis://redis:6379/0
-
-MAX_DIFF_LINES=500
-```
-
-```bash
-chmod 600 .env
-```
-
-### 5. Configure Credentials
-
-Bitbucket credentials are stored per workspace (organization) in `config/credentials.yml`.
-This file is **never committed to git**.
-
-```bash
-cp config/credentials.yml.example config/credentials.yml
-nano config/credentials.yml
-chmod 600 config/credentials.yml
-```
-
-Generate a webhook secret for each repository:
-```bash
-openssl rand -hex 32
-```
-
-**Auth options** — use whichever your Bitbucket plan supports (first match wins per repo):
-
-**Option A — Repository Access Token** (per-repo, most common)
-- Repository → **Settings → Security → Access tokens → Create access token**
-- Scopes: **Repositories: Read** | **Pull requests: Read, Write**
-
-**Option B — Workspace Access Token** (one token for all repos in the workspace)
-- Workspace → **Settings → Security → Access tokens → Create access token**
-- Scopes: **Repositories: Read** | **Pull requests: Read, Write**
-
-**Option C — App Password** (legacy, still works)
-- Profile avatar → **Personal settings → App passwords → Create app password**
-- Permissions: **Repositories: Read** | **Pull requests: Read, Write**
-
-```yaml
-bitbucket:
-  workspaces:
-
-    # Option A: per-repo token
-    first-workspace:
-      repositories:
-        backend-api:
-          api_token: ATBBxxxxxxxxxxxx         # Repository Access Token
-          webhook_secret: aabbccdd...
-        frontend-app:
-          api_token: ATBByyyyyyyyyyyy
-          webhook_secret: 11223344...
-
-    # Option B: workspace token shared by all repos
-    second-workspace:
-      api_token: ATBBzzzzzzzzzzzzzz           # Workspace Access Token
-      repositories:
-        mobile-app:
-          webhook_secret: deadbeef...
-        data-service:
-          webhook_secret: cafebabe...
-
-    # Option C: App Password (legacy)
-    third-workspace:
-      username: alice
-      app_password: ATBBaaaaaaaaaaaa
-      repositories:
-        legacy-app:
-          webhook_secret: 00001111...
-```
-
-No bot restart is needed when editing this file — credentials are read on every request.
-
-### 6. Build and Start
-
-```bash
-cd ~/code-review
 docker compose up -d --build
+docker compose ps                      # app, worker, redis, prometheus, grafana — all Up
+curl http://localhost:8000/health      # {"status":"ok","redis":"ok"}
 ```
 
-Verify all containers are running:
-```bash
-docker compose ps
-```
+### 3. Expose over HTTPS
 
-Expected:
-```
-NAME                    STATUS          PORTS
-code-review-app-1       Up (healthy)    0.0.0.0:8000->8000/tcp
-code-review-worker-1    Up
-code-review-redis-1     Up (healthy)    0.0.0.0:6379->6379/tcp
-```
-
-Check the health endpoint:
-```bash
-curl http://localhost:8000/health
-# Expected: {"status":"ok","redis":"ok"}
-```
-
-Check startup logs:
-```bash
-docker compose logs app
-docker compose logs worker
-```
-
-### 7. Nginx Reverse Proxy
-
-Run as root. Replace `yourdomain.com` with your actual domain.
-
-```bash
-nano /etc/nginx/sites-available/code-review
-```
+Nginx site proxying to the app:
 
 ```nginx
 server {
-    listen 80;
-    server_name yourdomain.com;
-
+    server_name review.example.com;
     location / {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Request-ID $request_id;
-
         client_max_body_size 10M;
-        proxy_read_timeout 30s;
     }
 }
 ```
 
 ```bash
-ln -s /etc/nginx/sites-available/code-review /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
+certbot --nginx -d review.example.com
+ufw allow OpenSSH && ufw allow 'Nginx Full' && ufw deny 8000 && ufw enable
 ```
 
-### 8. SSL Certificate
+Redis and Prometheus listen on localhost only. Grafana (`:3000`) is public and starts with `admin`/`admin` — change the password, or put it behind Nginx and close the port.
+
+### 4. Add a repository
+
+1. Add it to `config/projects.yml` (see [Configuring projects](#configuring-projects)).
+2. Add its token/secret to `config/credentials.yml` if the workspace isn't there yet.
+3. Add a webhook in the repo:
+   - **Bitbucket:** Repository settings → Webhooks → Add. URL `https://<domain>/webhook/bitbucket`, secret = `webhook_secret`, triggers: Pull request **Created**, **Updated**, **Comment created**.
+   - **GitHub:** URL `/webhook/github`, content type JSON, secret = `webhook_secret`, events: Pull requests, Issue comments.
+   - **GitLab:** URL `/webhook/gitlab`, secret token = `webhook_secret`, trigger: Merge request events.
+4. Open a test PR and watch `docker compose logs -f worker`.
+
+No restart needed — `projects.yml` and `credentials.yml` are read on every review.
+
+## Configuring projects
+
+Settings are resolved per PR: defaults → `config/projects.yml` (on the server) → `.codereview.yml` in the repo root (read from the target branch, overrides the central file).
+
+```yaml
+projects:
+  myworkspace/my-service:          # repo full name: workspace/slug
+    language: java
+    target_branches: [master, demo-dev]
+    max_diff_lines: 5000
+    ignore_paths: ["**/*.properties", "src/generated/**"]
+    ai_focus: [bugs, billing rules]
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `language` | `auto` | `java`, `dotnet`, `php`, `js`, `python`, `auto` (by file extensions). Selects the prompt and Semgrep rules |
+| `target_branches` | `[master, main]` | Only PRs into these branches are reviewed |
+| `ai_review` | `true` | Run the AI review |
+| `ai_verify` | `true` | Second AI pass that drops unproven AI findings |
+| `ai_focus` | `[security, bugs]` | `security`, `bugs`, `performance` or free text |
+| `ai_context_files` | `[CLAUDE.md]` | Repo files sent to the AI as the project's conventions |
+| `static_analysis` | `true` | Run Semgrep |
+| `semgrep_rules` | `[owasp, security-audit]` | e.g. `p/java`, `p/csharp`, `p/php`, `p/javascript`, `p/python`, `p/django`, `p/secrets` |
+| `semgrep_ai_verify` | `true` | AI re-checks Semgrep findings |
+| `block_merge_on` | `[CRITICAL]` | Severities that set the build status to `FAILED`; `[]` never blocks |
+| `max_diff_lines` | `500` | Larger diffs are cut at file/hunk boundaries; skipped files are listed in the summary |
+| `ignore_paths` | `[]` | Globs excluded from review |
+| `notify_authors` | `[]` | PR authors (display names) whose new PRs trigger a Mattermost message |
+| `review_mode` | `diff` | `diff`, `agentic`, `shadow` — **central file only** |
+| `agent_max_steps` | `20` | Agentic: code lookups per review — **central file only** |
+| `context_repos` | `[]` | Agentic: other repos the agent may search — **central file only** |
+
+`config/projects.yml.example` has ready-made blocks for each language.
+
+**Better results:** put a `CLAUDE.md` in the repo describing its architecture and conventions; name branches with the Jira key (`feature/BP-123-...`); write a PR description. All of it goes to the AI as context.
+
+## Review modes
+
+```yaml
+  myworkspace/my-backend:
+    review_mode: agentic            # diff | agentic | shadow
+    context_repos: [myworkspace/shared-core]
+```
+
+| Mode | Posted to the PR | Cost |
+|------|------------------|------|
+| `diff` | Standard review | 1× |
+| `agentic` | Review by an AI that reads the repository (`read_file`, `grep`, `find_files`, `list_dir`) before reporting. **On any failure the standard review runs instead**, with a note in the summary | several × |
+| `shadow` | Standard review; the agentic one runs afterwards and is only recorded | 1× + agentic |
+
+Start with `shadow`, compare, then switch to `agentic`:
 
 ```bash
-certbot --nginx -d yourdomain.com
-# Choose: Redirect HTTP to HTTPS
-
-certbot renew --dry-run   # verify auto-renewal works
+docker compose exec worker python scripts/shadow_report.py --details
 ```
 
-### 9. Firewall
+**Where the agent reads code from** — nothing is cloned for it, and the PR branch is never checked out:
+
+- `/opt/projects/<repo-slug>` on the server — shallow clones of each repo's main branch, updated by a separate cron. Mounted **read-only**; the bot never changes it. **A repo that isn't there is not reviewed agentically.**
+- Files changed in the PR are taken from the PR's head commit through the platform API and laid over that snapshot; files the PR deletes are hidden.
+- PRs into another branch (`demo-dev`, …) use the bot's own depth-1 clone of that branch (Docker volume `branch_snapshots`, re-cloned every 6 hours, no history kept). Create big ones in advance — otherwise the first review clones inside its time budget, may fall back, and won't retry for an hour:
+
+  ```bash
+  docker compose exec worker python -m app.context.snapshots bitbucket myworkspace/my-backend demo-dev
+  ```
+
+Limits: `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` (800k), `AGENT_MAX_DIFF_TOKENS` (30k; diffs over 3× fall back), 600 s of extra task time — the regular time stays reserved for the fallback. Other settings: `PROJECTS_SNAPSHOT_DIR` (`/projects`), `BRANCH_SNAPSHOT_DIR` (`/repos`), `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6).
+
+## Operations
 
 ```bash
-ufw allow OpenSSH
-ufw allow 'Nginx Full'
-ufw deny 8000        # block direct app port access
-ufw deny 6379        # block Redis from outside
-ufw enable
-ufw status
+git pull && docker compose up -d --build app worker   # update
+docker compose restart app worker                     # apply .env changes
+docker compose logs -f worker                         # follow reviews
+docker compose logs worker | grep -E "Done —|failed|fell back|Shadow review"
 ```
 
-### 10. Register Projects
+**Monitoring.** Prometheus scrapes `/metrics`; Grafana (`:3000`) has dashboards for reviews, findings, AI cost and reliability (`grafana/dashboards/`). Notable metrics: `code_review_ai_verify_total`, `code_review_agentic_total{result="ok|fallback|shadow_ok|shadow_failed"}`, daily token usage vs. budget.
 
-For each repository you want reviewed:
-
-1. Add the project to `config/projects.yml` — see [Managing Projects](#managing-projects) section above
-2. Add the Bitbucket webhook:
-   - **Repository Settings → Webhooks → Add webhook**
-   - URL: `https://yourdomain.com/webhook/bitbucket`
-   - Secret: the `webhook_secret` for that workspace from `config/credentials.yml`
-   - Triggers: **Pull request: Created** + **Pull request: Updated**
-
-### 11. Verify End-to-End
+**Redis** holds the queue and all metrics. It runs with AOF + RDB snapshots on the `redis_data` volume and restores the latest backup if the volume is empty.
 
 ```bash
-# Tail worker logs while opening a real test PR
-docker compose logs -f worker
+./scripts/setup-redis-persistence.sh               # one-time setup
+./scripts/redis-backup.sh                          # backup to backups/redis/ (cron it, or use the systemd timer
+                                                   #   scripts/redis-auto-backup.{service,timer})
+./scripts/redis-restore.sh backups/redis/<file>.rdb
 ```
 
-Manual webhook test with a signed request:
-```bash
-SECRET="webhook-secret-for-myworkspace"
-PAYLOAD=$(cat tests/fixtures/bitbucket_payload.json)
-SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print "sha256="$2}')
-
-curl -s -X POST https://yourdomain.com/webhook/bitbucket \
-  -H "Content-Type: application/json" \
-  -H "X-Hub-Signature: $SIG" \
-  -d "$PAYLOAD"
-# Expected: {"status":"queued","task_id":"..."}
-```
-
-Check a task was queued:
-```bash
-docker compose exec redis redis-cli LLEN celery
-# Expected: 1
-```
-
-### Maintenance
-
-#### Update application
-
-```bash
-cd ~/code-review
-git pull                          # or rsync new files
-docker compose up -d --build      # rebuilds only changed layers
-```
-
-#### Add / edit workspace credentials
-
-```bash
-nano ~/code-review/config/credentials.yml
-# No restart needed
-```
-
-#### Add / edit project settings
-
-```bash
-nano ~/code-review/config/projects.yml
-# No restart needed
-```
-
-#### View logs
-
-```bash
-docker compose logs -f              # all services, live
-docker compose logs -f worker       # worker only
-docker compose logs --tail=100 app  # last 100 lines
-```
-
-Log format is structured JSON (structlog). To filter by field:
-```bash
-docker compose logs worker 2>&1 | grep '"status": "failure"'
-```
-
-#### Restart services
-
-```bash
-docker compose restart app worker   # apply .env changes
-docker compose restart              # all services
-```
-
-#### Stop / tear down
-
-```bash
-docker compose down                 # stop, keep Redis volume
-docker compose down -v              # stop + delete all data
-```
-
-#### Scale workers
-
-Edit `docker-compose.yml` → worker service → `--concurrency=8`, then:
-```bash
-docker compose up -d --scale worker=2   # run 2 worker containers
-```
-
----
-
-## Redis Backups & Persistence
-
-All review metrics and statistics are stored in Redis. The system is configured to survive reboots and container recreation.
-
-### Quick Setup
-
-Run the setup script to configure everything:
-
-```bash
-./scripts/setup-redis-persistence.sh
-```
-
-### Configuration
-
-Redis is configured with:
-- **AOF (Append Only File)**: Enabled, syncs every second
-- **RDB Snapshots**: Automatic every 15min (1 change), 5min (10 changes), 1min (10000 changes)
-- **Password protection**: Enabled (set `REDIS_PASSWORD` in `.env`)
-- **Network access**: Localhost only (`127.0.0.1:6379`)
-- **Volume persistence**: Docker volume `redis_data` mounted to `/data`
-- **Auto-restore**: Automatically restores from latest backup on container recreation
-
-### Auto-Restore on Reboot
-
-Redis now automatically restores data on container recreation:
-1. On container start, checks for existing data in `/data`
-2. If no data found, looks for latest backup in `/backups/redis/`
-3. Automatically restores the most recent `redis_backup_*.rdb` file
-4. Starts Redis with restored data
-
-### Manual Backup
-
-```bash
-# Create backup manually
-./scripts/redis-backup.sh
-
-# Or trigger SAVE from within Redis
-docker compose exec redis redis-cli -a $REDIS_PASSWORD SAVE
-```
-
-### Automated Backups
-
-#### Option 1: Cron (macOS/Linux)
-
-Add to crontab for hourly backups:
-
-```bash
-# Edit crontab
-crontab -e
-
-# Add this line (hourly backups)
-0 * * * * cd /path/to/code-review && ./scripts/redis-backup.sh >> logs/redis-backup.log 2>&1
-```
-
-#### Option 2: Systemd Timer (Linux)
-
-```bash
-# Install service and timer
-sudo cp scripts/redis-auto-backup.* /etc/systemd/system/
-sudo systemctl enable redis-auto-backup.timer
-sudo systemctl start redis-auto-backup.timer
-
-# Check status
-systemctl status redis-auto-backup.timer
-```
-
-### Restore from Backup
-
-```bash
-# List available backups
-ls -la backups/redis/
-
-# Manual restore (if auto-restore doesn't work)
-./scripts/redis-restore.sh backups/redis/redis_backup_20240328_120000.rdb
-```
-
-### Redis Data Survival
-
-Your metrics will survive:
-- ✅ Container restarts
-- ✅ Server reboots (with Docker volume + auto-restore)
-- ✅ App redeploys (automatic backup before redeploy recommended)
-- ✅ Container recreation (auto-restore from latest backup)
-
-Your metrics will NOT survive:
-- ❌ Volume deletion (`docker compose down -v`)
-- ❌ Manual Redis FLUSHALL
-- ❌ Deleting backups/redis/ directory
-
-### Monitoring Metrics Retention
-
-Check current metrics in Redis:
-
-```bash
-# Connect to Redis CLI
-docker compose exec redis redis-cli -a $REDIS_PASSWORD
-
-# Check all metrics keys
-KEYS metrics:*
-
-# Check specific metric
-HGETALL metrics:reviews
-HGETALL metrics:webhooks
-
-# Check memory usage
-INFO memory
-```
-
-### Reset Metrics (if needed)
-
-```bash
-# Clear all metrics
-docker compose exec redis redis-cli -a $REDIS_PASSWORD
-> DEL metrics:webhooks metrics:reviews metrics:findings:severity
-> DEL metrics:by_lang metrics:by_project metrics:by_author
-> DEL metrics:findings_by_lang metrics:findings_by_project metrics:findings_by_author
-> DEL metrics:duration:sum_ms metrics:duration:count
-> EXIT
-```
-
-### Back up Redis (Alternative method)
-
-```bash
-mkdir -p ~/code-review/backups
-docker run --rm \
-  -v code-review_redis_data:/data \
-  -v ~/code-review/backups:/backup \
-  alpine tar czf /backup/redis-$(date +%Y%m%d).tar.gz /data
-```
-
----
+`docker compose down -v` deletes all metrics.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| `/health` returns `{"redis":"error"}` | Redis container not running | `docker compose ps redis`; `docker compose restart redis` |
-| Webhook returns `400` with "No credentials" | Workspace not in `credentials.yml` | Add the workspace block to `config/credentials.yml` |
-| Webhook returns `401` | Wrong `webhook_secret` for this workspace | Compare `credentials.yml` value with the Bitbucket webhook secret field |
-| Webhook returns `202` but nothing happens | Worker not running or crashed | `docker compose ps worker`; `docker compose logs worker` |
-| Build status stuck at `INPROGRESS` | Worker crashed mid-task | `docker compose logs --tail=100 worker` — look for Python exceptions |
-| "PR too large" comment posted | Diff exceeds `max_diff_lines` | Increase limit in `config/projects.yml` for this repo, or split the PR |
-| Worker retrying endlessly | Bad API key or Bitbucket `app_password` | Verify `ANTHROPIC_API_KEY` in `.env`; verify `app_password` in `credentials.yml` |
-| Container exits on startup | Missing required env var | `docker compose logs app` — check for pydantic `ValidationError` |
-| Semgrep times out | Large or complex files | Reduce `max_diff_lines`; increase timeout in `semgrep_runner.py` |
-| No comments, no status update | Check Bitbucket webhook delivery log for HTTP status; verify `BITBUCKET_WEBHOOK_SECRET` matches |
-| Webhook returns 401 (projects) | Secret in Bitbucket doesn't match `BITBUCKET_WEBHOOK_SECRET` in `.env` |
-| No inline comments | Check `ignore_paths` isn't filtering all files; check worker logs for path errors |
-| AI returns no findings | Set explicit `language:` in the project config; verify `ANTHROPIC_API_KEY` is valid |
-| Semgrep returns no findings | `docker compose logs worker` — check for `semgrep: not found`; rebuild image |
+| Symptom | Check |
+|---------|-------|
+| Webhook `400` "No credentials" | The workspace/repo is missing in `config/credentials.yml` |
+| Webhook `401` | `webhook_secret` differs from the secret in the platform's webhook |
+| `202` but no review | `docker compose ps worker`, `docker compose logs --tail=100 worker` |
+| PR is ignored | Target branch not in `target_branches`; repo key in `projects.yml` must be `workspace/slug` |
+| Build status `STOPPED` | Daily token budget reached or AI API failing — the summary says which |
+| Worker restarts on start | `docker compose logs worker` — usually a dependency or `.env` error |
+| Summary says "Deep review unavailable" | Agentic failed and the standard review ran; the reason is in the note (e.g. repo not in `/opt/projects`) |
+| No Jira context | `JIRA_*` unset, no ticket key in branch/title, or `Failed to fetch Jira ticket` in the logs |
 
----
+## Development
 
-## Architecture
-
+```bash
+pip install -r requirements.txt
+pytest tests/ -m "not integration"     # unit tests; integration ones need semgrep installed
+uvicorn app.main:app --reload          # API
+celery -A app.workers.celery_app worker --loglevel=info
 ```
-Git Platform (Bitbucket / GitHub / GitLab)
-        │  webhook POST (PR opened / updated)
-        ▼
-   Nginx (TLS termination)
-        │
-        ▼
-   FastAPI  app/main.py
-        │  HMAC validate → Celery task
-        ▼
-   Celery Worker  app/workers/celery_app.py
-        │
-   ┌────┴───────────────────┐
-   ▼                        ▼
-SemgrepRunner          AIReviewer
-app/analyzers/         app/analyzers/
-semgrep_runner.py      ai_reviewer.py
-   │                        │
-   └──────────┬─────────────┘
-              │  merge + dedup + sort by severity
-              ▼           app/analyzers/merger.py
-   GitPlatform adapter
-   (post inline comments + summary + build status)
-```
-
----
-
-## Project Structure
 
 ```
 app/
-├── main.py                   # FastAPI: webhook routes + /health
-├── models.py                 # Finding, PRContext, ReviewConfig, Severity
-├── adapters/
-│   ├── base.py               # GitPlatform ABC + hmac_verify() + BOT_MARKER
-│   ├── bitbucket.py          # Bitbucket Cloud adapter (httpx)
-│   └── factory.py            # get_adapter(platform, settings)
-├── analyzers/
-│   ├── semgrep_runner.py     # Semgrep subprocess wrapper
-│   ├── ai_reviewer.py        # Anthropic SDK, prompt loading, JSON parsing
-│   └── merger.py             # dedup (sha256 key) + severity sort
-├── workers/
-│   └── celery_app.py         # process_review task, ThreadPoolExecutor
-└── config/
-    ├── settings.py           # pydantic-settings, @lru_cache singleton
-    └── project_config.py     # load config/projects.yml + .codereview.yml
-
-config/
-├── projects.yml.example      # template; projects.yml itself is per-instance and git-ignored
-└── credentials.yml.example
-
-prompts/
-├── review_base.md     # shared review rules, severity, evidence rule, JSON schema
-├── java_prompt.md     # language pitfalls, appended to review_base.md
-├── dotnet_prompt.md
-├── php_prompt.md
-├── js_prompt.md
-├── python_prompt.md
-├── verify_ai.md       # second pass that refutes AI findings
-├── agent_review.md    # tool-use instructions for review_mode agentic/shadow
-└── verify_semgrep.md  # AI triage of Semgrep findings
-
-tests/
-├── test_adapters.py
-├── test_analyzers.py
-├── test_merger.py
-├── test_worker.py
-└── fixtures/
+├── main.py              webhooks, /health, /metrics
+├── models.py            Finding, PRContext, ReviewConfig
+├── metrics.py           Redis counters → Prometheus
+├── adapters/            Bitbucket, GitHub, GitLab (GitPlatform in base.py)
+├── analyzers/           semgrep_runner, ai_reviewer (diff mode), agent_reviewer (agentic), merger
+├── context/             PR context + Jira, code snapshots, agent tools
+├── config/              settings (.env), project_config (projects.yml + .codereview.yml)
+├── notifiers/           Mattermost
+├── utils/diff_parser.py ignore / truncate the diff
+└── workers/celery_app.py  the review pipeline, shadow task
+prompts/                 review_base.md + <language>_prompt.md, verify_*.md, agent_review.md
 ```
 
----
+Prompts are read on every review — edit them without a restart.
 
-## Dev Commands
+**New language:** add `prompts/<language>_prompt.md` (language pitfalls only; rules and JSON schema are in `review_base.md`), map extensions in `_EXT_TO_LANG` (`app/config/project_config.py`) and Semgrep rules in `SEMGREP_RULE_MAP` (`app/analyzers/semgrep_runner.py`).
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+**New platform:** implement `GitPlatform` (`app/adapters/base.py`), register it in `app/adapters/factory.py`, add a `/webhook/<platform>` route in `app/main.py`, add tests.
 
-# Run the API server locally
-uvicorn app.main:app --reload
-
-# Run a Celery worker locally
-celery -A app.workers.celery_app worker --loglevel=info
-
-# Unit tests (no semgrep required)
-pytest tests/ -m "not integration"
-
-# All tests including integration (requires semgrep installed)
-pytest tests/
-
-# Full stack via Docker
-docker compose up --build
-```
-
----
-
-## How to Add a New Git Platform Adapter
-
-1. Create `app/adapters/<platform>.py`, implement all abstract methods from `GitPlatform` in `base.py`
-2. Register it in `get_adapter()` in `app/adapters/factory.py`
-3. Add `POST /webhook/<platform>` route in `app/main.py`
-4. Add tests in `tests/test_adapters.py`
-5. Document the webhook setup in this README
-
-## How to Add a New Language
-
-1. Create `prompts/<language>_prompt.md` — language-specific pitfalls only; rules and the JSON schema live in `prompts/review_base.md`
-2. Add extension mappings to `_EXT_TO_LANG` in `app/config/project_config.py`
-3. Add a Semgrep rule mapping to `SEMGREP_RULE_MAP` in `app/analyzers/semgrep_runner.py`
-4. Add a quick-reference config block in the Project Configuration section above
-
----
-
-## Key Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| `Finding.dedup_key` via sha256 | Single dedup mechanism; Semgrep findings win ties (inserted first) |
-| Prompt files as `.md`, not hardcoded | Prompt tuning without code deploys or restarts |
-| `ThreadPoolExecutor` in Celery | Semgrep is subprocess, Anthropic SDK is sync — asyncio adds complexity with no benefit |
-| `task_acks_late=True` | Message stays in queue until task completes — prevents data loss on worker crash |
-| `worker_prefetch_multiplier=1` | Semgrep is CPU-heavy; one task per worker prevents resource contention |
-| `HTTP 202` from webhook handler | Never wait for analysis — guarantees <1 sec webhook response |
-| `BOT_MARKER` in every comment | Platform-agnostic way to find own comments for cleanup on re-review |
-| Central `config/projects.yml` | Onboard projects without touching their codebase; `.codereview.yml` in repo can override |
-| Graceful analyzer failures | If Semgrep or AI fails, task continues with the other's results |
-
----
-
-## Roadmap
-
-### Phase 1 — Foundation & Basic Pipeline ✓
-- [x] VPS Setup (Nginx, SSL, Redis, MySQL)
-- [x] Orchestrator Skeleton (FastAPI + webhook)
-- [x] Bitbucket Adapter
-- [x] Async Queue (Redis + Celery)
-- [x] Semgrep Integration (Java)
-- [x] End-to-End Test (Bitbucket)
-
-### Phase 2 — AI Review ✓
-- [x] Claude API Integration
-- [x] Prompt Engineering
-- [x] Token Management
-- [x] Results Merge (dedup + sort)
-- [x] Incremental Review
-- [x] Calibration
-
-### Phase 3 — Multi-Platform & Multi-Language ✓
-- [x] GitHub Adapter (`app/adapters/github.py`)
-- [x] GitLab Adapter (`app/adapters/gitlab.py`)
-- [x] .NET (C#) Support (Semgrep rules + AI prompts)
-- [x] PHP Support (Semgrep + PHPStan + AI prompts)
-- [x] JavaScript/TypeScript Support (ESLint + Semgrep + AI prompts)
-- [x] Per-Project Config (`.codereview.yml` parser and override logic)
-
-### Phase 4 — Notifications, Monitoring, Go-Live
-- [ ] Slack Integration (post review summary, alert on CRITICAL)
-- [ ] MySQL Metrics Schema (store issues, PRs, accuracy, timing, cost)
-- [ ] Grafana Dashboard (issues per team, severity trends, API cost)
-- [ ] Rate Limiting & Cost Controls (budget alerts)
-- [ ] Documentation (README, `.codereview.yml` reference, runbook)
-- [ ] Go-Live (gradual rollout per department)
+Design decisions and their reasons are in [CLAUDE.md](CLAUDE.md).

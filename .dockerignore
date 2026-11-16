@@ -1,0 +1,25 @@
+# Secrets never go into the image. At runtime docker-compose passes .env as
+# environment variables (env_file) and mounts config/ read-only, so the
+# containers still get them — without a copy in every image layer.
+.env
+.env.*
+config/credentials.yml
+**/*.pem
+**/*.key
+
+# Redis backups can hold review data
+backups/
+
+# Not needed to run the app
+.git
+.gitignore
+.github
+.idea
+.vscode
+.claude
+**/.DS_Store
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.venv
+venv

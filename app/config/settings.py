@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # repo guide files (ai_context_files). Chars, ~4 chars per token; 0 disables.
     AI_PR_CONTEXT_MAX_CHARS: int = 40_000
     AI_DAILY_TOKEN_BUDGET: int = 10_000_000  # input+output tokens per day; 0 = unlimited
+    # Input tokens served from the provider's prompt cache cost a fraction of normal ones
+    # (Claude ~0.1×). They count toward the budget at this weight.
+    AI_CACHED_TOKEN_WEIGHT: float = 0.1
 
     # Agentic review (review_mode: agentic | shadow)
     # Shared shallow clones of each repo's main branch (the server's /opt/projects, mounted
@@ -50,6 +53,9 @@ class Settings(BaseSettings):
     AGENT_MAX_TOKENS_PER_REVIEW: int = 800_000
     # Chars of one tool result sent back to the model
     AGENT_TOOL_RESULT_MAX_CHARS: int = 12_000
+    # An agent that answers with fewer code lookups than this is sent back once to check
+    # callers and definitions first; 0 disables
+    AGENT_MIN_TOOL_CALLS: int = 2
 
     # Jira (optional) — the ticket whose key is in the source branch or PR title is
     # sent to the AI as the change's intent. Empty JIRA_BASE_URL disables it.

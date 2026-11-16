@@ -208,7 +208,7 @@ def test_tool_output_is_capped(projects_dir):
 
 def _settings(**kw) -> Settings:
     base = dict(ANTHROPIC_API_KEY="k", REDIS_URL="redis://localhost:6379/0", AI_PROVIDER="claude",
-                AI_DAILY_TOKEN_BUDGET=0)
+                AI_DAILY_TOKEN_BUDGET=0, AGENT_MIN_TOOL_CALLS=0)  # the investigate-first rule has its own tests
     base.update(kw)
     return Settings(**base)
 
@@ -231,6 +231,12 @@ def _agent(settings=None) -> AgentReviewer:
 def _claude(*blocks, stop="end_turn"):
     return SimpleNamespace(content=list(blocks), stop_reason=stop,
                            usage=SimpleNamespace(input_tokens=100, output_tokens=10))
+
+
+def _sent_text(message) -> str:
+    """Text of a sent message — a string, or blocks once it carries a cache breakpoint."""
+    content = message["content"]
+    return content if isinstance(content, str) else "".join(b.get("text", "") for b in content if isinstance(b, dict))
 
 
 def _tool_use(call_id, name, args):
@@ -259,8 +265,8 @@ def test_agent_reads_code_with_tools_then_answers():
     tools.run.assert_called_once_with("grep", {"pattern": "rate\\("})
     first = create.call_args_list[0].kwargs
     assert {t["name"] for t in first["tools"]} == {"read_file", "grep", "find_files", "list_dir"}
-    assert "You can read the repository" in first["system"]
-    assert first["messages"][0]["content"].startswith("PR_CONTEXT — intent")
+    assert "You can read the repository" in first["system"][0]["text"]
+    assert _sent_text(first["messages"][0]).startswith("PR_CONTEXT — intent")
     tool_result = create.call_args_list[1].kwargs["messages"][-1]["content"][0]
     assert tool_result["type"] == "tool_result" and tool_result["tool_use_id"] == "t1"
 
@@ -284,7 +290,7 @@ def test_agent_is_asked_for_an_answer_when_steps_run_out():
         result = agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=2), tools)
     assert list(result) == []
     last_user = create.call_args_list[2].kwargs["messages"][-1]
-    assert "tool budget for this review is used up" in last_user["content"]
+    assert "tool budget for this review is used up" in _sent_text(last_user)
 
 
 @pytest.mark.parametrize("responses, reason", [
@@ -524,7 +530,7 @@ def test_agent_end_to_end_on_a_real_snapshot(tools):
     tool_result = create.call_args_list[1].kwargs["messages"][-1]["content"][0]["content"]
     assert tool_result == "src/dto/Booking.java:3:  int rate() { return r; }"
     assert len(result) == 1 and result.tool_calls == 1
-    assert "ws/repo: the PR's repository" in create.call_args_list[0].kwargs["messages"][0]["content"]
+    assert "ws/repo: the PR's repository" in _sent_text(create.call_args_list[0].kwargs["messages"][0])
 
 
 # --- worker: building the agent's view ---
@@ -573,3 +579,69 @@ def test_pr_overlay_hides_deleted_and_renamed_away_files():
     overlay, lazy = celery_app._pr_overlay(ctx, raw, {"src/New.java": "b\n"})
     assert overlay == {"src/Old.java": None, "src/New.java": "b\n", "src/Gone.java": None}
     assert lazy == {"src/Big.java"}
+
+
+# --- depth: the agent must look at the code ---
+
+def test_agent_that_answers_without_reading_code_is_sent_back_once():
+    agent = _agent(_settings(AGENT_MIN_TOOL_CALLS=2))
+    tools = MagicMock(calls=2)
+    tools.run.return_value = "src/X.java:3: caller"
+    responses = [_claude(_text("[]")),                                   # answers from the diff alone
+                 _claude(_tool_use("a", "grep", {"pattern": "total\\("})),
+                 _claude(_tool_use("b", "read_file", {"path": "src/dto/Booking.java"})),
+                 _claude(_text(FINDING))]
+    with patch.object(agent._client.beta.messages, "create", side_effect=responses) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(), tools)
+    assert len(result) == 1 and tools.run.call_count == 2
+    second = create.call_args_list[1].kwargs["messages"]
+    assert second[-2]["role"] == "assistant"
+    assert "answered after 0 code lookup(s)" in second[-1]["content"][0]["text"]
+
+
+def test_investigate_first_is_asked_only_once():
+    agent = _agent(_settings(AGENT_MIN_TOOL_CALLS=2))
+    with patch.object(agent._client.beta.messages, "create",
+                      side_effect=[_claude(_text("[]")), _claude(_text("[]"))]) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+    assert list(result) == [] and create.call_count == 2
+
+
+# --- cost: prompt caching and how cached tokens count ---
+
+def test_claude_agent_marks_system_and_newest_message_for_caching():
+    agent = _agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    responses = [_claude(_tool_use("a", "grep", {"pattern": "x"})), _claude(_text("[]"))]
+    with patch.object(agent._client.beta.messages, "create", side_effect=responses) as create:
+        agent.review_agentic(_ctx(), ReviewConfig(), tools)
+    second = create.call_args_list[1].kwargs
+    assert second["system"][0]["cache_control"] == {"type": "ephemeral"}
+    marked = [m for m in second["messages"] if isinstance(m["content"], list)
+              and any(isinstance(b, dict) and "cache_control" in b for b in m["content"])]
+    assert marked == [second["messages"][-1]]  # only the newest message, never accumulating
+    assert second["messages"][-1]["content"][-1]["type"] == "tool_result"
+
+
+def test_cached_tokens_count_at_their_weight():
+    from types import SimpleNamespace
+    agent = _agent(_settings(AI_CACHED_TOKEN_WEIGHT=0.1))
+    usage = SimpleNamespace(input_tokens=200, cache_creation_input_tokens=1000, cache_read_input_tokens=30000,
+                            output_tokens=50)
+    response = SimpleNamespace(content=[_text("[]")], stop_reason="end_turn", usage=usage)
+    with patch.object(agent._client.beta.messages, "create", return_value=response):
+        agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+    agent._redis.incrby.assert_called_once_with(agent._budget_key(), 1200 + 50 + 3000)
+    agent._redis.hincrby.assert_any_call("metrics:ai_tokens_by_provider", "claude:cached", 30000)
+
+
+def test_glm_cached_prompt_tokens_are_split_out():
+    from types import SimpleNamespace
+    agent = _agent(_settings(AI_PROVIDER="glm", ZAI_API_KEY="z", AI_CACHED_TOKEN_WEIGHT=0.1))
+    usage = SimpleNamespace(prompt_tokens=40000, completion_tokens=100,
+                            prompt_tokens_details=SimpleNamespace(cached_tokens=36000))
+    final = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="[]", tool_calls=None))], usage=usage)
+    with patch.object(agent._client.chat.completions, "create", return_value=final):
+        agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+    agent._redis.incrby.assert_called_once_with(agent._budget_key(), 4000 + 100 + 3600)

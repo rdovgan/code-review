@@ -194,7 +194,11 @@ docker compose exec worker python scripts/shadow_report.py --details
   docker compose exec worker python -m app.context.snapshots bitbucket myworkspace/my-backend demo-dev
   ```
 
-Limits: `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` (800k), `AGENT_MAX_DIFF_TOKENS` (30k; diffs over 3× fall back), 600 s of extra task time — the regular time stays reserved for the fallback. Other settings: `PROJECTS_SNAPSHOT_DIR` (`/projects`), `BRANCH_SNAPSHOT_DIR` (`/repos`), `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6).
+Depth: the agent must check the change against the code — an agent that answers after fewer than `AGENT_MIN_TOOL_CALLS` (2) code lookups is sent back once to grep callers and read definitions. The summary shows how many lookups it made.
+
+Cost: every step re-sends the conversation. With Claude it is marked for prompt caching, so earlier steps are read from the cache; Z.AI caches repeated prefixes for GLM by itself. Cache reads count toward the daily budget at `AI_CACHED_TOKEN_WEIGHT` (0.1) and show up as `kind="cached"` in `code_review_ai_tokens_total`.
+
+Limits: `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` (800k, cache reads weighted), `AGENT_MAX_DIFF_TOKENS` (30k; diffs over 3× fall back), 600 s of extra task time — the regular time stays reserved for the fallback. Other settings: `PROJECTS_SNAPSHOT_DIR` (`/projects`), `BRANCH_SNAPSHOT_DIR` (`/repos`), `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6).
 
 ## Claude Code skills
 

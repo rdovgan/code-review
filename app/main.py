@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -26,6 +27,11 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
+# httpx logs every request URL at INFO. Some URLs are secrets (the Mattermost webhook URL is
+# its own credential), so request lines stay out of the logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 settings = get_settings()
 metrics = Metrics(settings.REDIS_URL, ai_daily_token_budget=settings.AI_DAILY_TOKEN_BUDGET)
 
@@ -36,7 +42,7 @@ async def lifespan(app: FastAPI):
         r = aioredis.from_url(settings.REDIS_URL)
         await r.ping()
         await r.aclose()
-        logger.info("redis_connected", url=settings.REDIS_URL)
+        logger.info("redis_connected")  # REDIS_URL carries the password — never log it
     except Exception as exc:
         logger.warning("redis_unavailable", error=str(exc))
     yield

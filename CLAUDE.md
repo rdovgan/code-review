@@ -51,7 +51,7 @@ app/
     └── project_config.py     # load config/projects.yml + .codereview.yml
 
 config/
-└── projects.yml              # central per-project settings registry
+└── projects.yml.example      # template; projects.yml is per-instance and git-ignored
 
 prompts/
 ├── review_base.md            # shared rules + JSON schema; <language>_prompt.md is appended
@@ -119,7 +119,7 @@ docker compose up --build
 | `worker_prefetch_multiplier=1` | Semgrep is CPU-heavy; one task per worker prevents resource contention |
 | `HTTP 202` from webhook handler | Never wait for analysis — guarantees <1 sec webhook response |
 | `BOT_MARKER` in every comment | Platform-agnostic way to find own comments for cleanup on re-review |
-| Central `config/projects.yml` | Onboard projects without touching their codebase; `.codereview.yml` in repo can override |
+| Central `config/projects.yml`, git-ignored | Onboard projects without touching their codebase; `.codereview.yml` in repo can override. Each bot instance keeps its own registry, so it is not in git — `projects.yml.example` is the template |
 | Graceful analyzer failures | If Semgrep or AI fails, task continues with the other's results |
 | Semgrep findings AI-verified before posting (`semgrep_ai_verify`) | Cuts static-analysis false positives; fails open (keeps findings unfiltered) if verification errors out — a verification hiccup must never hide a real finding |
 | PR_CONTEXT sent with every AI request | Without the PR description, Jira ticket and the repo's CLAUDE.md the model can only match generic patterns; every source is best-effort and capped by `AI_PR_CONTEXT_MAX_CHARS` |

@@ -37,6 +37,8 @@ build/
 ### Project secrets ###
 .env
 config/credentials.yml
+# Instance-specific project registry — start from config/projects.yml.example
+config/projects.yml
 __pycache__/
 *.pyc
 .pytest_cache/

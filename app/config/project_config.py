@@ -42,9 +42,17 @@ def detect_language(changed_files: list[str]) -> str:
     return counts.most_common(1)[0][0]
 
 
+_missing_registry_logged = False
+
+
 def _load_central_config(repo_full_name: str) -> dict:
     """Return the config dict for repo_full_name from config/projects.yml, or {}."""
+    global _missing_registry_logged
     if not _PROJECTS_CONFIG_PATH.exists():
+        if not _missing_registry_logged:
+            logger.warning("config/projects.yml not found — every repo is reviewed with defaults. "
+                           "Create it from config/projects.yml.example")
+            _missing_registry_logged = True
         return {}
     try:
         data = yaml.safe_load(_PROJECTS_CONFIG_PATH.read_text())

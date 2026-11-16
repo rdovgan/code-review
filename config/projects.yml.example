@@ -1,0 +1,91 @@
+# Project registry for this Code Review Bot instance.
+#
+#   cp config/projects.yml.example config/projects.yml
+#
+# config/projects.yml is instance-specific and git-ignored: each team that runs
+# the bot keeps its own copy on its server. It is read on every review, so edits
+# apply without a restart.
+#
+# Each key under "projects" is a repo full name: workspace/repository-slug.
+# Only listed fields override the defaults; a .codereview.yml in the repo root
+# overrides this file. Credentials live in config/credentials.yml, not here.
+#
+# Defaults (what an unlisted field gets):
+#   language: auto                 # java | dotnet | php | js | python | auto
+#   ai_review: true
+#   ai_verify: true                # second AI pass that drops unproven AI findings
+#   ai_context_files: [CLAUDE.md]  # repo files sent to the AI as project conventions
+#   ai_focus: [security, bugs]     # security | bugs | performance | free text
+#   static_analysis: true          # Semgrep
+#   semgrep_ai_verify: true
+#   semgrep_rules: [owasp, security-audit]
+#   block_merge_on: [CRITICAL]     # severities that set the build status to FAILED
+#   max_diff_lines: 500
+#   ignore_paths: []
+#   target_branches: [master, main]
+#   notify_authors: []             # PR authors that trigger a Mattermost message
+
+# Shared settings can be reused with a YAML anchor:
+x-team-notify: &team_notify
+  notify_authors:
+    - "Jane Developer"
+    - "John Developer"
+
+projects:
+
+  # Minimal entry: everything else at defaults
+  myworkspace/my-service:
+    language: java
+
+  # Java backend with its own conventions and notifications
+  myworkspace/my-backend:
+    <<: *team_notify
+    language: java
+    target_branches: ["master", "develop"]
+    static_analysis: false
+    max_diff_lines: 5000
+    ai_focus:
+      - bugs
+      - billing rules
+    ai_context_files:
+      - CLAUDE.md
+      - docs/architecture.md
+    ignore_paths:
+      - "**/*.properties"
+      - "**/*.md"
+      - ".idea/**"
+
+  # Frontend
+  myworkspace/my-frontend:
+    language: js
+    max_diff_lines: 3000
+    ignore_paths:
+      - "dist/**"
+      - "**/*.min.js"
+      - "package-lock.json"
+    semgrep_rules:
+      - owasp
+      - p/javascript
+
+  # C# / .NET service
+  myworkspace/my-dotnet-service:
+    language: dotnet
+    block_merge_on:
+      - CRITICAL
+      - BUG
+    ignore_paths:
+      - "**/*.Designer.cs"
+      - "**/Migrations/*"
+    semgrep_rules:
+      - owasp
+      - p/csharp
+
+  # PHP application
+  myworkspace/my-php-app:
+    language: php
+    ignore_paths:
+      - "vendor/*"
+      - "storage/*"
+    semgrep_rules:
+      - owasp
+      - p/php

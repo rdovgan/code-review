@@ -61,7 +61,8 @@ When a PR is opened or updated in Bitbucket, the bot:
 # 1. Copy and fill in your credentials
 cp .env.example .env
 
-# 2. Register your first project
+# 2. Register your first project (the file is instance-specific and git-ignored)
+cp config/projects.yml.example config/projects.yml
 nano config/projects.yml
 
 # 3. Start everything
@@ -83,6 +84,8 @@ config/projects.yml    ← central registry, managed on the VPS
 ```
 
 You can onboard a project by editing `config/projects.yml` alone — no changes to the repo are required.
+
+`config/projects.yml` is not in git: every instance of the bot keeps its own registry on its server. Start from `config/projects.yml.example`, which lists every field with its default. Back it up together with `config/credentials.yml`.
 
 ### Adding a Project
 
@@ -842,7 +845,8 @@ app/
     └── project_config.py     # load config/projects.yml + .codereview.yml
 
 config/
-└── projects.yml              # central per-project settings registry
+├── projects.yml.example      # template; projects.yml itself is per-instance and git-ignored
+└── credentials.yml.example
 
 prompts/
 ├── review_base.md     # shared review rules, severity, evidence rule, JSON schema

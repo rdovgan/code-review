@@ -114,3 +114,20 @@ def test_bitbucket_list_endpoints_follow_pagination():
     assert first.kwargs["params"] == {"pagelen": 100}
     assert second.args[0] == "https://api.bitbucket.org/2.0/next-page"
     assert second.kwargs["params"] is None
+
+
+def test_projects_example_uses_only_known_config_fields():
+    """config/projects.yml is git-ignored; the example is what new instances start from."""
+    import yaml
+    from dataclasses import fields
+    from app.config.project_config import _REVIEW_CONFIG_FIELDS
+    from app.models import ReviewConfig
+
+    example = Path(__file__).parent.parent / "config" / "projects.yml.example"
+    projects = yaml.safe_load(example.read_text())["projects"]
+    assert projects
+    known = set(_REVIEW_CONFIG_FIELDS)
+    assert known <= {f.name for f in fields(ReviewConfig)}
+    for name, settings in projects.items():
+        assert "/" in name
+        assert set(settings) <= known, (name, set(settings) - known)

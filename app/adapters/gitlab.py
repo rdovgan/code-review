@@ -4,7 +4,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import GitPlatform
+from app.adapters.base import GitCloneSpec, GitPlatform
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ GITLAB_API = "https://gitlab.com/api/v4"
 class GitlabAdapter(GitPlatform):
     def __init__(self, webhook_secret: str, token: str, base_url: str = "") -> None:
         self._secret = webhook_secret
+        self._token = token
         self._bot_username: str | None = None
         self._base_url = base_url.rstrip("/") if base_url else GITLAB_API
         self._client = httpx.Client(
@@ -29,6 +30,10 @@ class GitlabAdapter(GitPlatform):
     def validate_webhook(self, body: bytes, headers: dict) -> bool:
         token = headers.get("x-gitlab-token", "")
         return token == self._secret
+
+    def git_clone_spec(self, repo_full_name: str) -> GitCloneSpec:
+        host = self._base_url.removesuffix("/api/v4")
+        return GitCloneSpec(url=f"{host}/{repo_full_name}.git", username="oauth2", password=self._token)
 
     def parse_webhook(self, payload: dict) -> Optional[PRContext]:
         if payload.get("object_kind") != "merge_request":

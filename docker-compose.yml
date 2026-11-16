@@ -23,6 +23,8 @@ services:
       - .env
     volumes:
       - ./config:/app/config:ro
+      # Bare git mirrors for review_mode agentic/shadow (REPO_MIRRORS_DIR)
+      - repo_mirrors:/repos
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
     depends_on:
       redis:
@@ -86,6 +88,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  repo_mirrors:
   redis_data:
   prometheus_data:
   grafana_data:

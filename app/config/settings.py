@@ -33,6 +33,20 @@ class Settings(BaseSettings):
     AI_PR_CONTEXT_MAX_CHARS: int = 40_000
     AI_DAILY_TOKEN_BUDGET: int = 10_000_000  # input+output tokens per day; 0 = unlimited
 
+    # Agentic review (review_mode: agentic | shadow)
+    # Bare git mirrors of reviewed and context repos; empty disables agentic review
+    REPO_MIRRORS_DIR: str = "/repos"
+    # Max seconds for one clone/fetch. Pre-clone big repos (see README) — a first clone
+    # that does not fit in the review's time budget falls back to the diff review.
+    REPO_SYNC_TIMEOUT: int = 900
+    # Diff tokens per agent conversation. Smaller than AI_MAX_DIFF_TOKENS: the diff is
+    # re-sent on every agent step, and the agent reads surrounding code with tools.
+    AGENT_MAX_DIFF_TOKENS: int = 30_000
+    # Input+output tokens one agentic review may spend before it must give its answer
+    AGENT_MAX_TOKENS_PER_REVIEW: int = 800_000
+    # Chars of one tool result sent back to the model
+    AGENT_TOOL_RESULT_MAX_CHARS: int = 12_000
+
     # Jira (optional) — the ticket whose key is in the source branch or PR title is
     # sent to the AI as the change's intent. Empty JIRA_BASE_URL disables it.
     JIRA_BASE_URL: str = ""

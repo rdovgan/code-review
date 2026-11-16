@@ -24,7 +24,10 @@ ENV PATH="/venv/bin:$PATH"
 COPY . .
 
 # Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# /repos holds the bare git mirrors for agentic review; created here so the named
+# volume mounted over it starts out owned by appuser
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app && \
+    mkdir -p /repos && chown appuser:appuser /repos
 ENV SEMGREP_VERSION_CACHE_PATH=/tmp/.semgrep_version
 ENV SEMGREP_SEND_METRICS=off
 USER appuser

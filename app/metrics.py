@@ -16,6 +16,7 @@ Dimensional data is stored as hashes with composite field "label1:label2":
   metrics:ai_tokens_by_provider → {"claude:input": N, "claude:output": N, ...}
   metrics:semgrep_verify → {"kept": N, "dropped": N, "fail_open": N}
   metrics:ai_verify      → {"kept": N, "dropped": N, "fail_open": N}
+  metrics:agentic        → {"ok": N, "fallback": N, "shadow_ok": N, "shadow_failed": N}
   metrics:semgrep_errors → {"timeout": N, "bad_exit": N, "invalid_json": N}
 
 The `ai_tokens:<date>` key (no "metrics:" prefix, one per day) is owned and written by
@@ -54,6 +55,8 @@ class Metrics:
     SEMGREP_VERIFY_KEY = "metrics:semgrep_verify"
     # AI findings re-checked by a second AI pass — written by app/analyzers/ai_reviewer.py.
     AI_VERIFY_KEY = "metrics:ai_verify"
+    _AGENTIC_KEY = "metrics:agentic"
+    AGENTIC_RESULTS = ("ok", "fallback", "shadow_ok", "shadow_failed")
 
     # Semgrep runner errors — shared with app/analyzers/semgrep_runner.py.
     SEMGREP_ERRORS_KEY = "metrics:semgrep_errors"
@@ -157,6 +160,13 @@ class Metrics:
         except Exception:
             pass
 
+    def record_agentic(self, result: str) -> None:
+        """result: ok | fallback (agentic mode) | shadow_ok | shadow_failed (shadow mode)"""
+        try:
+            self._r.hincrby(self._AGENTIC_KEY, result, 1)
+        except Exception:
+            pass
+
     def inc_semgrep_verify_fail_open(self) -> None:
         try:
             self._r.hincrby(self.SEMGREP_VERIFY_KEY, "fail_open", 1)
@@ -199,6 +209,7 @@ class Metrics:
             ai_budget_exceeded = int(self._r.get(self.AI_BUDGET_EXCEEDED_KEY) or 0)
             semgrep_verify = self._r.hgetall(self.SEMGREP_VERIFY_KEY)
             ai_verify = self._r.hgetall(self.AI_VERIFY_KEY)
+            agentic = self._r.hgetall(self._AGENTIC_KEY)
             semgrep_errors = self._r.hgetall(self.SEMGREP_ERRORS_KEY)
             task_retries = int(self._r.get(self._TASK_RETRIES_KEY) or 0)
         except Exception:
@@ -372,6 +383,14 @@ class Metrics:
             "# TYPE code_review_ai_verify_fail_open_total counter",
             f"code_review_ai_verify_fail_open_total {ai_verify.get('fail_open', 0)}",
         ]
+
+        # --- agentic review ---
+        lines += [
+            "# HELP code_review_agentic_total Agentic reviews: ok, fell back to diff review, shadow runs",
+            "# TYPE code_review_agentic_total counter",
+        ]
+        for result in self.AGENTIC_RESULTS:
+            lines.append(f'code_review_agentic_total{{result="{result}"}} {agentic.get(result, 0)}')
 
         # --- semgrep errors ---
         lines += [

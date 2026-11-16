@@ -225,6 +225,9 @@ If nothing appears after 30 seconds: `docker compose logs --tail=50 worker`
 | `semgrep_ai_verify` | bool | `true` | Re-check each Semgrep finding with AI and drop ones judged to be false positives before posting (fails open — keeps findings unfiltered if verification errors out) |
 | `ai_verify` | bool | `true` | Second AI pass that tries to refute each AI finding on the same material and drops the refuted ones (fails open). Roughly doubles AI cost for requests that produced findings |
 | `ai_context_files` | list | `[CLAUDE.md]` | Repo files read at the target branch and sent to the AI as the project's conventions. Missing files are skipped |
+| `review_mode` | string | `diff` | `diff`, `agentic` or `shadow` — see [Agentic Review](#agentic-review). Central config only |
+| `agent_max_steps` | int | `20` | Max code lookups (tool calls) per agentic review part. Central config only |
+| `context_repos` | list | `[]` | Other repos (same platform/workspace) the agent may search, at their default branch. Central config only |
 | `block_merge_on` | list | `[CRITICAL]` | Severity levels that set build status to FAILED |
 | `max_diff_lines` | int | `500` | Max diff lines analyzed (ignored files excluded first); the rest is cut at file/hunk boundaries and listed in the summary |
 | `ignore_paths` | list | `[]` | Glob patterns — matching files produce no findings |
@@ -297,7 +300,49 @@ myworkspace/legacy-monolith:
 
 ### Per-Repo Override (.codereview.yml)
 
-Teams can place a `.codereview.yml` in their repo root to override any central setting. It is read from the PR's **base branch** on every review, so changes take effect on the next PR without any bot restart.
+Teams can place a `.codereview.yml` in their repo root to override central settings. It is read from the PR's **base branch** on every review, so changes take effect on the next PR without any bot restart.
+
+`review_mode`, `agent_max_steps` and `context_repos` are the exception: they change cost and worker load, so only `config/projects.yml` can set them. The bot ignores them in `.codereview.yml` and logs a warning.
+
+### Agentic Review
+
+By default (`review_mode: diff`) the AI sees the diff, the changed files and the PR context. With `review_mode: agentic` it also reads the repository: a tool loop lets the model grep for callers, open definitions and check guards before it reports a finding — the main source of irrelevant findings in diff-only review is code the model never saw.
+
+```yaml
+projects:
+  myworkspace/my-backend:
+    review_mode: agentic       # diff | agentic | shadow
+    agent_max_steps: 20        # code lookups per review part
+    context_repos:             # also searchable, at their default branch
+      - myworkspace/shared-core
+```
+
+| Mode | What gets posted | Cost |
+|------|------------------|------|
+| `diff` | Standard review | 1× |
+| `agentic` | Agentic review; on **any** failure (repo not cloned, git error, model error, no valid answer, out of time or budget) the standard review runs instead, with a note in the summary | the diff is re-sent on every step — several times a diff review |
+| `shadow` | Standard review. An agentic review runs afterwards as a separate task and is only recorded, for comparison | diff + agentic |
+
+How it works:
+- The worker keeps bare git mirrors in the `repo_mirrors` volume (`REPO_MIRRORS_DIR`, default `/repos`). Code is read straight from git objects at the PR's head commit — no checkouts. Clone credentials are the ones in `config/credentials.yml`; Bitbucket access tokens need read access to the repository.
+- The agent has `read_file`, `grep`, `find_files` and `list_dir`, limited by `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` and time. When a limit is hit it is asked for its answer.
+- An agentic repo's review task gets 600 extra seconds; the regular time budget stays reserved for the fallback.
+- Fork PRs fall back (the head commit is not in the mirror). Diffs above 3 × `AGENT_MAX_DIFF_TOKENS` fall back too.
+- Context repos are only fetched during reviews, never cloned. Clone them once (below), or the agent works without them.
+
+**Pre-clone big repos.** A repo is cloned on its first agentic review, inside that review's time budget. A large repo will not fit: the review falls back, and clones are not retried for an hour. Clone such repos — and every context repo — once by hand:
+
+```bash
+docker compose exec worker python -m app.context.repo_mirror bitbucket myworkspace/my-backend
+```
+
+**Shadow results.** Each shadow run stores what was posted and what the agent found (30 days):
+
+```bash
+docker compose exec worker python scripts/shadow_report.py --details
+```
+
+`agent only` findings are what the diff review missed; `posted only` ones are what the agent did not confirm. Metrics: `code_review_agentic_total{result="ok|fallback|shadow_ok|shadow_failed"}`.
 
 ### Re-running the Review
 
@@ -380,6 +425,13 @@ AI_MAX_TOKENS=16000
 AI_MAX_DIFF_TOKENS=60000
 AI_FILE_CONTEXT_MAX_CHARS=120000
 AI_PR_CONTEXT_MAX_CHARS=40000
+
+# Agentic review (review_mode: agentic | shadow) — defaults shown
+# REPO_MIRRORS_DIR=/repos
+# REPO_SYNC_TIMEOUT=900
+# AGENT_MAX_DIFF_TOKENS=30000
+# AGENT_MAX_TOKENS_PER_REVIEW=800000
+# AGENT_TOOL_RESULT_MAX_CHARS=12000
 AI_DAILY_TOKEN_BUDGET=10000000
 
 # Optional: the Jira ticket whose key is in the source branch (or PR title) is sent to
@@ -856,6 +908,7 @@ prompts/
 ├── js_prompt.md
 ├── python_prompt.md
 ├── verify_ai.md       # second pass that refutes AI findings
+├── agent_review.md    # tool-use instructions for review_mode agentic/shadow
 └── verify_semgrep.md  # AI triage of Semgrep findings
 
 tests/

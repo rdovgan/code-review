@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from dataclasses import asdict
@@ -9,11 +10,14 @@ from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_failure, task_retry, task_revoked
 
 from app.adapters.factory import get_adapter
+from app.analyzers.agent_reviewer import AgentReviewer, AgentReviewFailed
 from app.analyzers.ai_reviewer import AIReviewer
 from app.analyzers.merger import filter_by_config, merge_findings
 from app.analyzers.semgrep_runner import SemgrepRunner
 from app.config.project_config import detect_language, load_project_config
 from app.config.settings import get_settings
+from app.context.code_tools import CodeTools, RepoView
+from app.context.snapshots import BranchSnapshot, SnapshotUnavailable, current_branch, shared_snapshot
 from app.context.review_context import gather_review_context
 from app.metrics import Metrics
 from app.models import PRContext, Severity
@@ -93,6 +97,13 @@ _EXTRA_SECONDS_PER_FILE = 15  # add 15s per file — one AI chunk takes ~30–60
 # Cap on the file count used for limit scaling — keeps the scaled hard limit
 # below the global safety net (360 + 60*15 = 1260s < 1740s)
 _MAX_FILE_COUNT_FOR_LIMITS = 60
+# review_mode: agentic gets this much extra time for the agent (incl. repo fetch); the
+# regular budget above stays reserved for the diff-review fallback
+_AGENTIC_EXTRA_SECONDS = 600
+# Shadow reviews run as their own task after the posted review
+_SHADOW_SOFT_TIME_LIMIT = 900
+_SHADOW_TIME_LIMIT = 960
+_SHADOW_RECORD_TTL_SECONDS = 30 * 86400
 
 celery_app = Celery(
     "code_review",
@@ -247,6 +258,8 @@ def process_review(self, task_payload: dict) -> dict:
 
 
 def _run_review(self, task_payload: dict) -> dict:
+    # From the task's start: time spent fetching, Semgrep and the agent all count against it
+    deadline = _task_deadline(self)
     payload = dict(task_payload)  # copy — pop() would corrupt dict on retry
     platform = payload.pop("platform")
     diff = payload.pop("diff", "")
@@ -278,6 +291,7 @@ def _run_review(self, task_payload: dict) -> dict:
 
     # Ignored/deleted/binary files are dropped before the line limit is applied, and the
     # limit cuts at file/hunk boundaries — see prepare_diff()
+    raw_diff = pr_context.diff  # the agent's view of the repo also needs the files this drops (deleted ones)
     prepared = prepare_diff(pr_context.diff, config.ignore_paths, config.max_diff_lines)
     pr_context.diff = prepared.diff
     if prepared.ignored_files:
@@ -319,6 +333,7 @@ def _run_review(self, task_payload: dict) -> dict:
     ai_reviewer = None
     ai_incomplete_reason = None  # set when the AI review did not cover the whole diff
     ai_reviewed_nothing = False  # ...and when it covered none of it
+    review_mode_note = None      # agentic review: how it went, shown in the summary
 
     try:
         if config.static_analysis:
@@ -344,34 +359,35 @@ def _run_review(self, task_payload: dict) -> dict:
                     logger.error("%s Step 1/2: Semgrep AI verification failed, keeping unverified results — %s", pr_tag, exc)
 
         if config.ai_review:
-            logger.info("%s Step 2/2: AI review started", pr_tag)
-            try:
-                ai_reviewer = ai_reviewer or AIReviewer(settings)
-                # Deadline = the task's soft time limit. The reviewer stops
-                # processing chunks shortly before it and returns partial
-                # findings, so the build status always gets finalized instead
-                # of the worker being SIGKILLed mid-review.
-                # Celery delivers limits as request.timelimit = (hard, soft).
-                deadline = None
-                timelimit = getattr(self.request, "timelimit", None)
-                if timelimit and len(timelimit) == 2 and timelimit[1]:
-                    deadline = time.monotonic() + timelimit[1]
-                ai_results = ai_reviewer.review(pr_context, config, deadline=deadline, file_contents=file_contents,
-                                                context=review_context)
-                stop_reason = getattr(ai_results, "stop_reason", None)
-                if stop_reason:
-                    ai_incomplete_reason = _AI_STOP_REASONS.get(stop_reason, stop_reason)
-                    ai_reviewed_nothing = getattr(ai_results, "chunks_reviewed", 0) == 0
-                    logger.warning(
-                        "%s Step 2/2: AI review incomplete (%s) — %d/%d chunk(s) reviewed",
-                        pr_tag, ai_incomplete_reason, ai_results.chunks_reviewed, ai_results.chunks_total,
-                    )
-                logger.info("%s Step 2/2: AI review complete — %d finding(s), %d dropped by verification",
-                            pr_tag, len(ai_results), getattr(ai_results, "dropped_by_verification", 0))
-            except Exception as exc:
-                logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)
-                ai_incomplete_reason = f"AI review failed: {type(exc).__name__}"
-                ai_reviewed_nothing = True
+            # deadline = the task's soft time limit. The reviewer stops before it and
+            # returns partial findings, so the build status always gets finalized
+            # instead of the worker being SIGKILLed mid-review.
+            agentic_done = False
+            if config.review_mode == "agentic":
+                logger.info("%s Step 2/2: Agentic review started", pr_tag)
+                try:
+                    ai_results = _agentic_review(adapter, pr_context, config, review_context,
+                                                 _agent_deadline(deadline, _soft_time_limit(self)), file_contents,
+                                                 raw_diff)
+                    agentic_done = True
+                    metrics.record_agentic("ok")
+                    review_mode_note = (f"> 🔎 Deep review: the AI checked the change against the repository "
+                                        f"({getattr(ai_results, 'tool_calls', 0)} code lookups).")
+                    logger.info("%s Step 2/2: Agentic review complete — %d finding(s), %d code lookup(s)",
+                                pr_tag, len(ai_results), getattr(ai_results, "tool_calls", 0))
+                except SoftTimeLimitExceeded:
+                    raise
+                except Exception as exc:
+                    reason = exc.reason if isinstance(exc, AgentReviewFailed) else f"error: {type(exc).__name__}"
+                    logger.warning("%s Step 2/2: Agentic review failed (%s) — falling back to diff review", pr_tag, reason)
+                    metrics.record_agentic("fallback")
+                    review_mode_note = f"> ℹ️ Deep review unavailable ({reason}); this is the standard diff review."
+                    ai_results = []
+
+            if not agentic_done:
+                logger.info("%s Step 2/2: AI review started", pr_tag)
+                ai_results, ai_incomplete_reason, ai_reviewed_nothing = _diff_ai_review(
+                    ai_reviewer, pr_context, config, deadline, file_contents, review_context, pr_tag)
         else:
             logger.info("%s Step 2/2: AI review skipped — disabled in config", pr_tag)
 
@@ -432,6 +448,8 @@ def _run_review(self, task_payload: dict) -> dict:
     if ai_incomplete_reason:
         scope = "did not run" if ai_reviewed_nothing else "covered only part of the diff"
         notes.append(f"> ⚠️ AI review {scope}: {ai_incomplete_reason}.")
+    if review_mode_note:
+        notes.append(review_mode_note)
 
     summary_comment_id = ""
     if findings or notes:
@@ -478,6 +496,9 @@ def _run_review(self, task_payload: dict) -> dict:
         "%s Done — total: %d (critical: %d, bugs: %d, perf: %d, suggestions: %d) status: %s",
         pr_tag, len(findings), critical_count, bug_count, perf_count, suggest_count, final_state,
     )
+
+    if config.review_mode == "shadow" and config.ai_review:
+        _enqueue_shadow_review(task_payload, findings, pr_tag)
     return {
         "findings": len(findings),
         "critical": critical_count,
@@ -486,3 +507,215 @@ def _run_review(self, task_payload: dict) -> dict:
         "suggestions": suggest_count,
         "status": final_state,
     }
+
+
+def _soft_time_limit(task) -> float | None:
+    """Celery delivers limits as request.timelimit = (hard, soft)."""
+    timelimit = getattr(task.request, "timelimit", None)
+    if timelimit and len(timelimit) == 2 and timelimit[1]:
+        return float(timelimit[1])
+    return None
+
+
+def _task_deadline(task) -> float | None:
+    """time.monotonic() value of the task's soft time limit; call it when the task starts."""
+    soft = _soft_time_limit(task)
+    return time.monotonic() + soft if soft else None
+
+
+def _agent_deadline(task_deadline: float | None, soft_limit: float | None) -> float:
+    """The agent gets _AGENTIC_EXTRA_SECONDS. The rest of the task's time — what a diff-mode
+    review of this PR gets — stays reserved for the fallback."""
+    agent_deadline = time.monotonic() + _AGENTIC_EXTRA_SECONDS
+    if task_deadline is not None and soft_limit:
+        fallback_reserve = max(soft_limit - _AGENTIC_EXTRA_SECONDS, _BASE_SOFT_TIME_LIMIT)
+        agent_deadline = min(agent_deadline, task_deadline - fallback_reserve)
+    return agent_deadline
+
+
+def _diff_ai_review(ai_reviewer, pr_context: PRContext, config, deadline, file_contents, review_context, pr_tag):
+    """The standard AI review. Returns (results, incomplete_reason, reviewed_nothing)."""
+    try:
+        ai_reviewer = ai_reviewer or AIReviewer(settings)
+        ai_results = ai_reviewer.review(pr_context, config, deadline=deadline, file_contents=file_contents,
+                                        context=review_context)
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception as exc:
+        logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)
+        return [], f"AI review failed: {type(exc).__name__}", True
+    incomplete_reason, reviewed_nothing = None, False
+    stop_reason = getattr(ai_results, "stop_reason", None)
+    if stop_reason:
+        incomplete_reason = _AI_STOP_REASONS.get(stop_reason, stop_reason)
+        reviewed_nothing = getattr(ai_results, "chunks_reviewed", 0) == 0
+        logger.warning("%s Step 2/2: AI review incomplete (%s) — %d/%d chunk(s) reviewed",
+                       pr_tag, incomplete_reason, ai_results.chunks_reviewed, ai_results.chunks_total)
+    logger.info("%s Step 2/2: AI review complete — %d finding(s), %d dropped by verification",
+                pr_tag, len(ai_results), getattr(ai_results, "dropped_by_verification", 0))
+    return ai_results, incomplete_reason, reviewed_nothing
+
+
+def _remaining(deadline: float) -> float:
+    return max(30.0, deadline - time.monotonic())
+
+
+def _base_snapshot(adapter, pr_context: PRContext, deadline: float):
+    """Snapshot of the PR's target branch: the shared one, or the bot's own for other branches."""
+    shared = shared_snapshot(settings.PROJECTS_SNAPSHOT_DIR, pr_context.repo_full_name)
+    if shared is None:
+        raise AgentReviewFailed(f"repository is not in {settings.PROJECTS_SNAPSHOT_DIR or 'the projects folder'}")
+    branch = current_branch(shared)
+    if branch == pr_context.target_branch:
+        return shared, f"{branch} (shared snapshot, refreshed nightly)"
+    try:
+        spec = adapter.git_clone_spec(pr_context.repo_full_name)
+    except NotImplementedError:
+        raise AgentReviewFailed(f"no snapshot of {pr_context.target_branch} and {pr_context.platform} cannot be cloned")
+    snapshot = BranchSnapshot(settings.BRANCH_SNAPSHOT_DIR, pr_context.repo_full_name, pr_context.target_branch,
+                              spec, max_age_seconds=settings.BRANCH_SNAPSHOT_MAX_AGE_HOURS * 3600,
+                              timeout=settings.BRANCH_SNAPSHOT_CLONE_TIMEOUT)
+    try:
+        return snapshot.ensure(timeout=_remaining(deadline)), f"{pr_context.target_branch} (bot snapshot)"
+    except SnapshotUnavailable as exc:
+        raise AgentReviewFailed(str(exc))
+
+
+def _pr_overlay(pr_context: PRContext, raw_diff: str, file_contents: dict) -> tuple[dict, set]:
+    """Files the PR changes, at its head: (prefetched path → content or None if removed, paths to fetch lazily).
+
+    raw_diff is the diff before prepare_diff(), which drops deleted files.
+    """
+    overlay: dict[str, str | None] = {}
+    for fd in split_diff_by_file(raw_diff or pr_context.diff):
+        header = fd.text.split("\n", 1)[0].split()
+        old_path = header[2][2:] if len(header) >= 3 else ""
+        if fd.deleted:
+            overlay[fd.path] = None
+            continue
+        if old_path and old_path != fd.path:  # rename: the old path is gone
+            overlay[old_path] = None
+        content = file_contents.get(fd.path)
+        if content is not None:
+            overlay[fd.path] = content
+    lazy = {p for p in pr_context.changed_files if p not in overlay}
+    return overlay, lazy
+
+
+def _build_code_tools(adapter, pr_context: PRContext, config, deadline: float, file_contents: dict,
+                      raw_diff: str) -> CodeTools:
+    """The PR's repo (target-branch snapshot + the PR's files on top), plus context repos."""
+    base, base_label = _base_snapshot(adapter, pr_context, deadline)
+    overlay, lazy = _pr_overlay(pr_context, raw_diff, file_contents)
+
+    def fetch(path: str) -> str | None:
+        try:
+            return adapter.get_file_content(pr_context, path, pr_context.head_sha)
+        except Exception as exc:
+            logger.warning("Failed to fetch %s for the agent: %s", path, exc)
+            return None
+
+    views = [RepoView(pr_context.repo_full_name, base,
+                      f"the PR's repository — files changed in this PR at the PR's head commit, "
+                      f"all other files at {base_label}",
+                      overlay=overlay, lazy_paths=lazy, fetch=fetch)]
+    for name in config.context_repos or []:
+        if name == pr_context.repo_full_name:
+            continue
+        path = shared_snapshot(settings.PROJECTS_SNAPSHOT_DIR, str(name))
+        if path is None:
+            logger.warning("[PR #%s %s] Context repo %s skipped: not in %s", pr_context.pr_id,
+                           pr_context.repo_full_name, name, settings.PROJECTS_SNAPSHOT_DIR)
+            continue
+        views.append(RepoView(str(name), path,
+                              f"related repository, at {current_branch(path) or 'its main branch'} "
+                              f"(shared snapshot, refreshed nightly)"))
+    return CodeTools(views, max_result_chars=settings.AGENT_TOOL_RESULT_MAX_CHARS)
+
+
+def _agentic_review(adapter, pr_context: PRContext, config, review_context: str, deadline: float,
+                    file_contents: dict | None = None, raw_diff: str = ""):
+    """Raises on any failure — the caller falls back to the diff review."""
+    tools = _build_code_tools(adapter, pr_context, config, deadline, file_contents or {}, raw_diff)
+    return AgentReviewer(settings).review_agentic(pr_context, config, tools, context=review_context, deadline=deadline)
+
+
+def _finding_dicts(findings) -> list[dict]:
+    return [{"severity": f.severity.value, "file": f.file, "line": f.line, "message": f.message,
+             "source": f.source} for f in findings]
+
+
+def _enqueue_shadow_review(task_payload: dict, posted_findings, pr_tag: str) -> None:
+    try:
+        process_shadow_review.apply_async(
+            args=[task_payload, _finding_dicts(posted_findings)],
+            soft_time_limit=_SHADOW_SOFT_TIME_LIMIT,
+            time_limit=_SHADOW_TIME_LIMIT,
+        )
+        logger.info("%s Shadow agentic review queued", pr_tag)
+    except Exception as exc:
+        logger.warning("%s Failed to queue shadow review: %s", pr_tag, exc)
+
+
+def shadow_record_key(repo_full_name: str, pr_id, head_sha: str) -> str:
+    return f"shadow_review:{repo_full_name}:{pr_id}:{head_sha[:12]}"
+
+
+@celery_app.task(bind=True)
+def process_shadow_review(self, task_payload: dict, posted: list[dict]) -> dict:
+    """Agentic review that is only recorded, never posted — compares it with what was posted.
+
+    Not wired to the failure signals of process_review: whatever happens here, the PR's
+    build status and comments stay as the posted review left them.
+    """
+    started = time.monotonic()
+    record = {"posted": posted, "agent": [], "tool_calls": 0, "error": None}
+    payload = dict(task_payload)
+    platform = payload.pop("platform")
+    payload.pop("diff", None)
+    pr_context = PRContext(platform=platform, diff="", **payload)
+    pr_tag = f"[PR #{pr_context.pr_id} {pr_context.repo_full_name}] [shadow]"
+    try:
+        deadline = (_task_deadline(self) or time.monotonic() + _SHADOW_SOFT_TIME_LIMIT) - 30
+        workspace, repo_slug = pr_context.repo_full_name.split("/", 1)
+        adapter = get_adapter(platform, workspace, repo_slug, settings)
+        pr_context.diff = adapter.get_diff(pr_context)
+        if not pr_context.changed_files:
+            pr_context.changed_files = adapter.get_changed_files(pr_context)
+        config = load_project_config(adapter, pr_context)
+        if pr_context.language == "auto":
+            pr_context.language = config.language if config.language != "auto" else detect_language(pr_context.changed_files)
+        raw_diff = pr_context.diff
+        pr_context.diff = prepare_diff(pr_context.diff, config.ignore_paths, config.max_diff_lines).diff
+        review_context = gather_review_context(adapter, pr_context, config, settings,
+                                               _fetch_commits(adapter, pr_context))
+        file_contents = _fetch_file_contents(adapter, pr_context, [fd.path for fd in split_diff_by_file(pr_context.diff)])
+        result = _agentic_review(adapter, pr_context, config, review_context, deadline, file_contents, raw_diff)
+        agent_findings = filter_by_config(merge_findings([], list(result)), config)
+        record.update(agent=_finding_dicts(agent_findings), tool_calls=getattr(result, "tool_calls", 0))
+        metrics.record_agentic("shadow_ok")
+    except Exception as exc:  # SoftTimeLimitExceeded included: a shadow run never escalates
+        record["error"] = exc.reason if isinstance(exc, AgentReviewFailed) else f"{type(exc).__name__}: {exc}"
+        metrics.record_agentic("shadow_failed")
+        logger.warning("%s Shadow review failed: %s", pr_tag, record["error"])
+
+    posted_keys = {(f["file"], f["line"]) for f in posted}
+    agent_keys = {(f["file"], f["line"]) for f in record["agent"]}
+    record.update(
+        both=len(posted_keys & agent_keys),
+        only_posted=len(posted_keys - agent_keys),
+        only_agent=len(agent_keys - posted_keys),
+        duration_ms=round((time.monotonic() - started) * 1000),
+        head_sha=pr_context.head_sha,
+        recorded_at=int(time.time()),
+    )
+    logger.info("%s Shadow review: posted=%d agent=%d both=%d only_agent=%d only_posted=%d lookups=%d",
+                pr_tag, len(posted), len(record["agent"]), record["both"], record["only_agent"],
+                record["only_posted"], record["tool_calls"])
+    try:
+        redis.from_url(settings.REDIS_URL).set(
+            shadow_record_key(pr_context.repo_full_name, pr_context.pr_id, pr_context.head_sha),
+            json.dumps(record), ex=_SHADOW_RECORD_TTL_SECONDS)
+    except Exception as exc:
+        logger.warning("%s Failed to store shadow record: %s", pr_tag, exc)
+    return {k: record[k] for k in ("both", "only_posted", "only_agent", "tool_calls", "error")}

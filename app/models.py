@@ -64,6 +64,13 @@ class ReviewConfig:
     ai_verify: bool = True
     # Repo files (read at the target branch) sent to the AI as project conventions
     ai_context_files: list[str] = field(default_factory=lambda: ["CLAUDE.md"])
+    # diff:    AI sees the diff + changed files (default)
+    # agentic: AI reads the repository with tools; falls back to diff on any failure
+    # shadow:  diff review is posted; an agentic review runs afterwards and is only recorded
+    review_mode: str = "diff"
+    agent_max_steps: int = 20
+    # Other repos (same platform and workspace credentials) the agent may search, at their default branch
+    context_repos: list[str] = field(default_factory=list)
     block_merge_on: list[str] = field(default_factory=lambda: ["CRITICAL"])
     max_diff_lines: int = 500
     slack_channel: str = ""

@@ -3,7 +3,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import GitPlatform, hmac_verify
+from app.adapters.base import GitCloneSpec, GitPlatform, hmac_verify
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,8 @@ BITBUCKET_API = "https://api.bitbucket.org"
 class BitbucketAdapter(GitPlatform):
     def __init__(self, webhook_secret: str, username: str = "", app_password: str = "", api_token: str = "") -> None:
         self._secret = webhook_secret
+        # Access tokens authenticate git over HTTPS as the "x-token-auth" user
+        self._git_auth = ("x-token-auth", api_token) if api_token else (username, app_password)
         if api_token:
             self._client = httpx.Client(
                 headers={"Authorization": f"Bearer {api_token}"},
@@ -47,6 +49,10 @@ class BitbucketAdapter(GitPlatform):
             params = None  # the "next" URL already carries pagelen and the page cursor
         logger.warning("Stopped paginating %s after %d pages", url, self._MAX_PAGES)
         return values
+
+    def git_clone_spec(self, repo_full_name: str) -> GitCloneSpec:
+        username, password = self._git_auth
+        return GitCloneSpec(url=f"https://bitbucket.org/{repo_full_name}.git", username=username, password=password)
 
     def validate_webhook(self, body: bytes, headers: dict) -> bool:
         sig_header = headers.get("x-hub-signature", "")

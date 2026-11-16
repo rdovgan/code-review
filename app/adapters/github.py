@@ -4,7 +4,7 @@ from typing import Optional
 
 import httpx
 
-from app.adapters.base import GitPlatform, hmac_verify
+from app.adapters.base import GitCloneSpec, GitPlatform, hmac_verify
 from app.models import Finding, PRContext
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ GITHUB_API = "https://api.github.com"
 class GithubAdapter(GitPlatform):
     def __init__(self, webhook_secret: str, token: str) -> None:
         self._secret = webhook_secret
+        self._token = token
         self._bot_username: str | None = None
         self._client = httpx.Client(
             headers={
@@ -24,6 +25,9 @@ class GithubAdapter(GitPlatform):
             timeout=30,
             follow_redirects=True,
         )
+
+    def git_clone_spec(self, repo_full_name: str) -> GitCloneSpec:
+        return GitCloneSpec(url=f"https://github.com/{repo_full_name}.git", username="x-access-token", password=self._token)
 
     def validate_webhook(self, body: bytes, headers: dict) -> bool:
         sig_header = headers.get("x-hub-signature-256", "")

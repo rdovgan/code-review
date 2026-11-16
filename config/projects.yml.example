@@ -24,6 +24,9 @@
 #   ignore_paths: []
 #   target_branches: [master, main]
 #   notify_authors: []             # PR authors that trigger a Mattermost message
+#   review_mode: diff              # diff | agentic | shadow — set here only, not in .codereview.yml
+#   agent_max_steps: 20            # agentic: code lookups per review part
+#   context_repos: []              # agentic: other repos the agent may search (must be in /opt/projects)
 
 # Shared settings can be reused with a YAML anchor:
 x-team-notify: &team_notify
@@ -37,10 +40,14 @@ projects:
   myworkspace/my-service:
     language: java
 
-  # Java backend with its own conventions and notifications
+  # Java backend with its own conventions and notifications.
+  # Agentic review: the AI reads the repo (and shared-core) before reporting.
   myworkspace/my-backend:
     <<: *team_notify
     language: java
+    review_mode: agentic
+    context_repos:
+      - myworkspace/shared-core
     target_branches: ["master", "develop"]
     static_analysis: false
     max_diff_lines: 5000
@@ -55,9 +62,10 @@ projects:
       - "**/*.md"
       - ".idea/**"
 
-  # Frontend
+  # Frontend — shadow: diff review is posted, the agentic one is only recorded
   myworkspace/my-frontend:
     language: js
+    review_mode: shadow
     max_diff_lines: 3000
     ignore_paths:
       - "dist/**"

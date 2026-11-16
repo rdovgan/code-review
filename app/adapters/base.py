@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Optional
 
 from app.models import Finding, PRContext
@@ -10,6 +11,17 @@ def hmac_verify(secret: str, body: bytes, signature: str, algorithm: str = "sha2
     mac = hmac.new(secret.encode(), body, algorithm)
     expected = mac.hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+@dataclass(frozen=True)
+class GitCloneSpec:
+    """How to clone a repo over HTTPS. Credentials go into an auth header, never into the URL."""
+    url: str
+    username: str = ""
+    password: str = ""
+
+    def __repr__(self) -> str:  # keep secrets out of logs and tracebacks
+        return f"GitCloneSpec(url={self.url!r})"
 
 
 class GitPlatform(ABC):
@@ -49,3 +61,7 @@ class GitPlatform(ABC):
     def set_review_status(self, pr_context: PRContext, state: str, description: str) -> bool:
         """state: "pending" | "success" | "failure" | "stopped" (review could not run)."""
         ...
+
+    def git_clone_spec(self, repo_full_name: str) -> GitCloneSpec:
+        """Clone URL and credentials for agentic review. Platforms without it fall back to diff review."""
+        raise NotImplementedError(f"{type(self).__name__} does not support cloning")

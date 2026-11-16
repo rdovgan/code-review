@@ -24,6 +24,7 @@ _PROJECTS_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "projec
 
 _REVIEW_CONFIG_FIELDS = (
     "language", "ai_review", "static_analysis", "semgrep_ai_verify", "ai_verify", "ai_context_files",
+    "review_mode", "agent_max_steps", "context_repos",
     "block_merge_on",
     "max_diff_lines", "slack_channel", "notify_authors",
     "ignore_paths", "semgrep_rules", "ai_focus", "target_branches",
@@ -64,11 +65,24 @@ def _load_central_config(repo_full_name: str) -> dict:
         return {}
 
 
-def _apply_dict(config: ReviewConfig, data: dict) -> None:
+# Cost-bearing switches: set only in the central registry. A .codereview.yml in the
+# repo must not be able to turn on the (more expensive) agentic review for itself.
+CENTRAL_ONLY_FIELDS = frozenset({"review_mode", "agent_max_steps", "context_repos"})
+
+REVIEW_MODES = ("diff", "agentic", "shadow")
+
+
+def _apply_dict(config: ReviewConfig, data: dict, skip: frozenset = frozenset()) -> None:
     """Overlay non-None values from data onto config in-place."""
     for field_name in _REVIEW_CONFIG_FIELDS:
-        if field_name in data:
+        if field_name in data and field_name not in skip:
             setattr(config, field_name, data[field_name])
+
+
+def central_review_mode(repo_full_name: str) -> str:
+    """review_mode from config/projects.yml — used at enqueue time to size the task's time limits."""
+    mode = _load_central_config(repo_full_name).get("review_mode", "diff")
+    return mode if mode in REVIEW_MODES else "diff"
 
 
 def load_project_config(adapter: GitPlatform, pr_context: PRContext) -> ReviewConfig:
@@ -90,8 +104,15 @@ def load_project_config(adapter: GitPlatform, pr_context: PRContext) -> ReviewCo
         if content:
             repo_data = yaml.safe_load(content)
             if isinstance(repo_data, dict):
-                _apply_dict(config, repo_data)
+                ignored = CENTRAL_ONLY_FIELDS & repo_data.keys()
+                if ignored:
+                    logger.warning("%s: .codereview.yml cannot set %s — use config/projects.yml",
+                                   pr_context.repo_full_name, ", ".join(sorted(ignored)))
+                _apply_dict(config, repo_data, skip=CENTRAL_ONLY_FIELDS)
     except Exception as exc:
         logger.warning("Failed to load .codereview.yml for %s: %s", pr_context.repo_full_name, exc)
 
+    if config.review_mode not in REVIEW_MODES:
+        logger.warning("%s: unknown review_mode %r, using 'diff'", pr_context.repo_full_name, config.review_mode)
+        config.review_mode = "diff"
     return config

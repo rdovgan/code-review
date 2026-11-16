@@ -33,6 +33,24 @@ class Settings(BaseSettings):
     AI_PR_CONTEXT_MAX_CHARS: int = 40_000
     AI_DAILY_TOKEN_BUDGET: int = 10_000_000  # input+output tokens per day; 0 = unlimited
 
+    # Agentic review (review_mode: agentic | shadow)
+    # Shared shallow clones of each repo's main branch (the server's /opt/projects, mounted
+    # read-only), kept current by a cron job outside the bot. A repo that is not here is
+    # never reviewed agentically. Empty disables agentic review.
+    PROJECTS_SNAPSHOT_DIR: str = "/projects"
+    # The bot's own depth-1 clones of other target branches (demo-dev, ...)
+    BRANCH_SNAPSHOT_DIR: str = "/repos"
+    BRANCH_SNAPSHOT_MAX_AGE_HOURS: float = 6
+    # Max seconds for one branch-snapshot clone
+    BRANCH_SNAPSHOT_CLONE_TIMEOUT: int = 900
+    # Diff tokens per agent conversation. Smaller than AI_MAX_DIFF_TOKENS: the diff is
+    # re-sent on every agent step, and the agent reads surrounding code with tools.
+    AGENT_MAX_DIFF_TOKENS: int = 30_000
+    # Input+output tokens one agentic review may spend before it must give its answer
+    AGENT_MAX_TOKENS_PER_REVIEW: int = 800_000
+    # Chars of one tool result sent back to the model
+    AGENT_TOOL_RESULT_MAX_CHARS: int = 12_000
+
     # Jira (optional) — the ticket whose key is in the source branch or PR title is
     # sent to the AI as the change's intent. Empty JIRA_BASE_URL disables it.
     JIRA_BASE_URL: str = ""

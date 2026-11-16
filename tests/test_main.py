@@ -137,3 +137,16 @@ def test_queue_review_lock_expires_after_five_minutes():
 
     assert mock_redis.set.call_args.args[0] == "review_lock:workspace/repo:1"
     assert mock_redis.set.call_args.kwargs["ex"] == 300
+
+
+def test_queue_review_gives_agentic_repos_extra_time():
+    """The agent gets its own time on top; the regular budget stays for the diff-review fallback."""
+    from app.workers.celery_app import _AGENTIC_EXTRA_SECONDS
+
+    adapter = MagicMock()
+    ctx = _make_pr_context(changed_files=["a.java", "b.java"])
+    with patch("app.main.central_review_mode", return_value="agentic"):
+        _, mock_apply = _run_queue_review(ctx, adapter)
+    kwargs = mock_apply.call_args.kwargs
+    assert kwargs["soft_time_limit"] == _BASE_SOFT_TIME_LIMIT + 2 * _EXTRA_SECONDS_PER_FILE + _AGENTIC_EXTRA_SECONDS
+    assert kwargs["time_limit"] == _BASE_TIME_LIMIT + 2 * _EXTRA_SECONDS_PER_FILE + _AGENTIC_EXTRA_SECONDS

@@ -10,10 +10,11 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.adapters.factory import get_adapter
+from app.config.project_config import central_review_mode
 from app.config.settings import get_settings
 from app.metrics import Metrics
 from app.workers.celery_app import (process_review, review_lock_key, REVIEW_LOCK_TTL_SECONDS,
-                                    _BASE_SOFT_TIME_LIMIT, _BASE_TIME_LIMIT,
+                                    _AGENTIC_EXTRA_SECONDS, _BASE_SOFT_TIME_LIMIT, _BASE_TIME_LIMIT,
                                     _EXTRA_SECONDS_PER_FILE, _MAX_FILE_COUNT_FOR_LIMITS)
 
 structlog.configure(
@@ -131,6 +132,10 @@ async def _queue_review(pr_context, platform: str, adapter) -> JSONResponse:
     file_count = min(len(pr_context.changed_files) or 10, _MAX_FILE_COUNT_FOR_LIMITS)
     soft_limit = _BASE_SOFT_TIME_LIMIT + file_count * _EXTRA_SECONDS_PER_FILE
     hard_limit = _BASE_TIME_LIMIT + file_count * _EXTRA_SECONDS_PER_FILE
+    if central_review_mode(pr_context.repo_full_name) == "agentic":
+        # Time for the agent on top; the regular budget stays for the diff-review fallback
+        soft_limit += _AGENTIC_EXTRA_SECONDS
+        hard_limit += _AGENTIC_EXTRA_SECONDS
     task = process_review.apply_async(
         args=[task_payload],
         soft_time_limit=soft_limit,

@@ -39,6 +39,9 @@ build/
 config/credentials.yml
 # Instance-specific project registry — start from config/projects.yml.example
 config/projects.yml
+config/projects.yml.*.bak
+config/repo-map.md
+.claude/settings.local.json
 __pycache__/
 *.pyc
 .pytest_cache/

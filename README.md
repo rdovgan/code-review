@@ -186,7 +186,7 @@ docker compose exec worker python scripts/shadow_report.py --details
 
 **Where the agent reads code from** — nothing is cloned for it, and the PR branch is never checked out:
 
-- `/opt/projects/<repo-slug>` on the server — shallow clones of each repo's main branch, updated by a separate cron. Mounted **read-only**; the bot never changes it. **A repo that isn't there is not reviewed agentically.**
+- `/opt/projects/<repo-slug>` on the server (`PROJECTS_HOST_DIR` in `.env` if it lives elsewhere) — shallow clones of each repo's main branch, updated by a separate cron. Mounted **read-only**; the bot never changes it. **A repo that isn't there is not reviewed agentically.**
 - Files changed in the PR are taken from the PR's head commit through the platform API and laid over that snapshot; files the PR deletes are hidden.
 - PRs into another branch (`demo-dev`, …) use the bot's own depth-1 clone of that branch (Docker volume `branch_snapshots`, re-cloned every 6 hours, no history kept). Create big ones in advance — otherwise the first review clones inside its time budget, may fall back, and won't retry for an hour:
 
@@ -195,6 +195,15 @@ docker compose exec worker python scripts/shadow_report.py --details
   ```
 
 Limits: `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` (800k), `AGENT_MAX_DIFF_TOKENS` (30k; diffs over 3× fall back), 600 s of extra task time — the regular time stays reserved for the fallback. Other settings: `PROJECTS_SNAPSHOT_DIR` (`/projects`), `BRANCH_SNAPSHOT_DIR` (`/repos`), `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6).
+
+## Claude Code skills
+
+The repo ships two skills (`.claude/skills/`) for whoever sets the bot up — run Claude Code in the bot's folder and ask:
+
+| Skill | Ask for | What it does |
+|-------|---------|--------------|
+| `code-review-onboarding` | "set up the code review bot", "check our setup" | New instance end to end: server, `.env`, credentials, snapshot folder (+ nightly refresh cron), Docker, HTTPS, webhooks, end-to-end check, backups. Never reads or prints secrets |
+| `code-review-repo-config` | "map our repos and configure them", "enable agentic review for X, Y" | Scans the repos (`scripts/scan_repos.py`: Maven/npm, HTTP calls, proxies, UI→backend), verifies the edges in code, draws `config/repo-map.md`, proposes per-repo settings and the token budget, writes `config/projects.yml` after you confirm |
 
 ## Operations
 

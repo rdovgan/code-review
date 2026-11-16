@@ -107,6 +107,55 @@ def test_process_review_verifies_semgrep_findings_with_ai(mock_config, mock_semg
     assert result["findings"] == 1
 
 
+@patch("app.workers.celery_app.gather_review_context", return_value="PR_CONTEXT — intent")
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_process_review_sends_pr_context_and_reuses_commits(mock_config, mock_semgrep_cls, mock_ai_cls,
+                                                            mock_get_adapter, mock_gather):
+    mock_adapter = MagicMock()
+    mock_adapter.get_existing_bot_comments.return_value = []
+    mock_adapter.get_pr_commits.return_value = ["feat: login"]
+    mock_get_adapter.return_value = mock_adapter
+    mock_config.return_value = ReviewConfig(static_analysis=False, notify_authors=["dev"])
+    mock_ai_cls.return_value.review.return_value = []
+
+    from app.workers import celery_app
+
+    ctx = _make_pr_context(is_new_pr=True)
+    payload = {"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx)}
+    with patch.object(celery_app.settings, "MATTERMOST_WEBHOOK_URL", "https://mm.example/hook"), \
+         patch("app.workers.celery_app.mattermost.send_message"):
+        celery_app.process_review.run(payload)
+
+    assert mock_ai_cls.return_value.review.call_args.kwargs["context"] == "PR_CONTEXT — intent"
+    assert mock_gather.call_args.args[4] == ["feat: login"]
+    mock_adapter.get_pr_commits.assert_called_once()  # shared by the AI context and Mattermost
+
+
+@patch("app.workers.celery_app.gather_review_context", side_effect=RuntimeError("jira down"))
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_process_review_runs_without_pr_context_when_gathering_fails(mock_config, mock_semgrep_cls, mock_ai_cls,
+                                                                    mock_get_adapter, mock_gather):
+    mock_adapter = MagicMock()
+    mock_adapter.get_existing_bot_comments.return_value = []
+    mock_get_adapter.return_value = mock_adapter
+    mock_config.return_value = ReviewConfig(static_analysis=False)
+    mock_ai_cls.return_value.review.return_value = []
+
+    from app.workers.celery_app import process_review
+
+    ctx = _make_pr_context()
+    result = process_review.run({"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx)})
+
+    assert mock_ai_cls.return_value.review.call_args.kwargs["context"] == ""
+    assert result["status"] == "success"
+
+
 @patch("app.workers.celery_app.get_adapter")
 @patch("app.workers.celery_app.AIReviewer")
 @patch("app.workers.celery_app.SemgrepRunner")

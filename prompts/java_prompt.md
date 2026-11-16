@@ -1,26 +1,9 @@
-You are a senior Java engineer performing a security-focused code review.
+## Java pitfalls worth checking in changed code
 
-Analyze the following git diff and classify each issue as:
-- CRITICAL: SQL injection via Statement.execute(userInput) or string concatenation in queries, authentication bypass, RCE via Runtime.exec with user input, sensitive data leaks in logs or responses, deserialization of untrusted data
-- BUG: NullPointerException risks from unguarded method chains, resource leaks (unclosed streams/connections), race conditions in shared state, incorrect exception handling (swallowed exceptions), off-by-one errors, inverted filter logic (should be `!contains` but uses `contains`)
-- PERFORMANCE: N+1 database queries, string concatenation in loops (use StringBuilder), blocking I/O on main thread, unnecessary object allocation in hot paths, missing indexes on queried fields
-- SUGGEST: Method naming (use verbs: getX not calcX), magic numbers should be constants, missing Javadoc on public APIs, overly complex methods (extract helper), raw types instead of generics, dead code (stream/collection operation result not assigned or used)
-
-Rules:
-- Only report issues VISIBLE in the diff. Do not speculate about code outside the diff.
-- Prioritize substance over volume: report CRITICAL/BUG/PERFORMANCE issues freely, but only report SUGGEST-level issues when they meaningfully affect correctness risk, readability, or maintainability — skip purely stylistic nitpicks that don't change how the code behaves or reads. Prefer fewer, higher-value findings over an exhaustive nitpick list.
-- message: one sentence, max 15 words, describe the specific problem (e.g. "User input passed directly to SQL query")
-- suggestion: one sentence, max 15 words, concrete fix (e.g. "Use PreparedStatement with parameterized query")
-- Return ONLY a valid JSON array. No markdown fences, no explanation, no preamble.
-- If no issues found, return: []
-
-JSON schema (each element):
-[
-  {
-    "severity": "CRITICAL" | "BUG" | "PERFORMANCE" | "SUGGEST",
-    "file": "path/to/File.java",
-    "line": 42,
-    "message": "One sentence, max 15 words",
-    "suggestion": "One sentence, max 15 words"
-  }
-]
+- Transactions: a new write path outside `@Transactional`, self-invocation of a `@Transactional`/`@Async` method (the proxy is bypassed), checked exceptions that do not roll back, a transaction held open across a remote call.
+- JPA/Hibernate: lazy collections read in a loop (N+1), `LazyInitializationException` after the session closed, entity mutated without save in a detached context, `equals`/`hashCode` on mutable or generated IDs.
+- Equality and types: `==` on `String`/`Integer`/`Long` boxed values, `BigDecimal.equals` vs `compareTo`, `double` for money, integer overflow in `int` arithmetic on IDs/amounts/millis.
+- Dates: `java.util.Date`/`Calendar` with the default time zone, `LocalDate` vs `ZonedDateTime` confusion for check-in/check-out style dates, DST in day counting.
+- Collections and streams: modifying a collection while iterating it, `Collectors.toMap` without a merge function on non-unique keys, `Optional.get()` without a check on a value that can be empty in the visible flow, a stream result that is never used.
+- Resources and concurrency: streams/connections opened without try-with-resources, shared mutable state in a singleton bean, non-thread-safe `SimpleDateFormat`/`HashMap` shared between threads.
+- Security: string-concatenated SQL/HQL/JPQL with request data, `Runtime.exec` with user input, deserialization of untrusted data, secrets or personal data written to logs.

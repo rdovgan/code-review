@@ -20,7 +20,8 @@ def _make_settings() -> Settings:
         BITBUCKET_USERNAME="user",
         BITBUCKET_APP_PASSWORD="pass",
         AI_PROVIDER="claude",  # pin — host .env may set glm, tests mock the Anthropic client
-        AI_MAX_DIFF_TOKENS=8000,
+        # A 1500-line test file is ~3.9k tokens: each fits alone, two don't — one request per file
+        AI_MAX_DIFF_TOKENS=4000,
     )
 
 
@@ -279,7 +280,7 @@ def test_ai_review_stops_at_deadline_returns_partial_findings():
          patch("app.analyzers.ai_reviewer.time.monotonic", side_effect=lambda: clock["now"]):
         # Reserve is 60s (stop if now > 1500-60=1440): chunks at clock 1000 and
         # 1300 run, the third iteration (clock 1600) crosses and breaks
-        findings = reviewer.review(ctx, ReviewConfig(), deadline=1500.0)
+        findings = reviewer.review(ctx, ReviewConfig(ai_verify=False), deadline=1500.0)
 
     assert calls["n"] == 2, "deadline guard must stop mid-loop before the hard timeout"
     assert len(findings) == 2
@@ -296,7 +297,7 @@ def test_ai_review_no_deadline_processes_all_chunks():
     ]))]
     empty_response.usage = MagicMock(input_tokens=10, output_tokens=5)
 
-    # Multi-file diff (one file per chunk): 4 files × ~10k tokens each > 8000
+    # Multi-file diff (one file per chunk): 4 files × ~3.9k tokens, limit 4000
     diff = "".join(
         f"diff --git a/File{i}.java b/File{i}.java\n" + "".join(f"+line {j}\n" for j in range(1500))
         for i in range(4)
@@ -304,7 +305,7 @@ def test_ai_review_no_deadline_processes_all_chunks():
     ctx = _make_pr_context(diff=diff)
 
     with patch.object(reviewer._client.beta.messages, "create", return_value=empty_response) as mock_create:
-        findings = reviewer.review(ctx, ReviewConfig(), deadline=None)
+        findings = reviewer.review(ctx, ReviewConfig(ai_verify=False), deadline=None)
 
     assert mock_create.call_count == 4  # one chunk per file
     assert len(findings) == 4
@@ -403,3 +404,83 @@ def test_ai_review_requests_server_side_fallback():
     kwargs = mock_create.call_args.kwargs
     assert kwargs["fallbacks"] == "default"
     assert "server-side-fallback-2026-07-01" in kwargs["betas"]
+
+
+def test_ai_review_packs_small_files_into_one_request():
+    """Files of one PR are reviewed together, not one blind request per file."""
+    settings = _make_settings()
+    settings.AI_MAX_DIFF_TOKENS = 9000  # two ~3.9k-token files fit, the third doesn't
+    reviewer = _make_reviewer(settings)
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        result = reviewer.review(_make_pr_context(diff=_multi_file_diff(3)), ReviewConfig())
+    assert mock_create.call_count == 2
+    first = mock_create.call_args_list[0].kwargs["messages"][0]["content"]
+    assert "File0.java" in first and "File1.java" in first and "File2.java" not in first
+    assert result.complete and result.chunks_reviewed == 2
+
+
+def test_ai_review_sends_pr_context_before_the_diff():
+    reviewer = _make_reviewer(_make_settings())
+    ctx = _make_pr_context()
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(ctx, ReviewConfig(), context="PR_CONTEXT — intent")
+    sent = mock_create.call_args.kwargs["messages"][0]["content"]
+    assert sent.startswith("PR_CONTEXT — intent")
+    assert sent.endswith(ctx.diff)
+
+
+def test_ai_review_prompt_combines_base_language_and_focus():
+    reviewer = _make_reviewer(_make_settings())
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(_make_pr_context(language="java"), ReviewConfig(ai_focus=["bugs", "billing rules"]))
+    system = mock_create.call_args.kwargs["system"]
+    assert "Evidence rule" in system            # review_base.md
+    assert "@Transactional" in system           # java_prompt.md
+    assert "broken business logic" in system    # known focus hint
+    assert "billing rules" in system            # free-form focus passed through
+
+
+def _finding_json(*lines: int) -> str:
+    return json.dumps([
+        {"severity": "BUG", "file": "Foo.java", "line": n, "message": f"m{n}", "suggestion": "s"} for n in lines
+    ])
+
+
+def test_ai_verification_drops_refuted_findings():
+    reviewer = _make_reviewer(_make_settings())
+    verdicts = json.dumps([{"index": 0, "verdict": "CONFIRMED"}, {"index": 1, "verdict": "FALSE_POSITIVE"}])
+    with patch.object(reviewer._client.beta.messages, "create",
+                      side_effect=[_response(_finding_json(1, 2)), _response(verdicts)]) as mock_create:
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    assert [f.line for f in result] == [1]
+    assert result.dropped_by_verification == 1
+    verify_call = mock_create.call_args_list[1].kwargs
+    assert "skeptical" in verify_call["system"]
+    assert "REVIEW_FINDINGS_JSON" in verify_call["messages"][0]["content"]
+
+
+def test_ai_verification_fails_open_on_error():
+    reviewer = _make_reviewer(_make_settings())
+    with patch.object(reviewer._client.beta.messages, "create",
+                      side_effect=[_response(_finding_json(1, 2)), RuntimeError("boom")]):
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    assert [f.line for f in result] == [1, 2]
+    assert result.complete  # a failed verification does not make the review incomplete
+
+
+def test_ai_verification_fails_open_without_usable_verdicts():
+    reviewer = _make_reviewer(_make_settings())
+    with patch.object(reviewer._client.beta.messages, "create",
+                      side_effect=[_response(_finding_json(1)), _response('[{"index": 7, "verdict": "CONFIRMED"}]')]):
+        result = reviewer.review(_make_pr_context(), ReviewConfig())
+    assert [f.line for f in result] == [1]
+
+
+def test_ai_verification_skipped_when_disabled_or_nothing_found():
+    reviewer = _make_reviewer(_make_settings())
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response(_finding_json(1))) as mock_create:
+        reviewer.review(_make_pr_context(), ReviewConfig(ai_verify=False))
+    assert mock_create.call_count == 1
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(_make_pr_context(), ReviewConfig())
+    assert mock_create.call_count == 1

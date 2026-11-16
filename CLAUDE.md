@@ -41,6 +41,9 @@ app/
 │   ├── semgrep_runner.py     # Semgrep subprocess wrapper
 │   ├── ai_reviewer.py        # Anthropic SDK, prompt loading, JSON parsing
 │   └── merger.py             # dedup (file:line key) + severity sort
+├── context/
+│   ├── jira.py               # ticket key from branch/title + Jira REST fetch
+│   └── review_context.py     # PR_CONTEXT block: description, commits, ticket, repo guides
 ├── workers/
 │   └── celery_app.py         # process_review task, ThreadPoolExecutor
 └── config/
@@ -51,10 +54,10 @@ config/
 └── projects.yml              # central per-project settings registry
 
 prompts/
-├── java_prompt.md
-├── dotnet_prompt.md
-├── php_prompt.md
-└── js_prompt.md
+├── review_base.md            # shared rules + JSON schema; <language>_prompt.md is appended
+├── java_prompt.md / dotnet / php / js / python   # language pitfalls only
+├── verify_ai.md              # second pass that refutes AI findings
+└── verify_semgrep.md
 
 tests/
 ├── test_adapters.py
@@ -96,7 +99,7 @@ docker compose up --build
 
 ## How to Add a New Language
 
-1. Create `prompts/<language>_prompt.md` — include language-specific CRITICAL/BUG examples
+1. Create `prompts/<language>_prompt.md` — language-specific pitfalls only; rules and schema are in `prompts/review_base.md`
 2. Add extension mappings to `_EXT_TO_LANG` in `app/config/project_config.py`
 3. Add a Semgrep rule mapping to `SEMGREP_RULE_MAP` in `app/analyzers/semgrep_runner.py`
 4. Add a quick-reference config block in `README.md`
@@ -119,6 +122,9 @@ docker compose up --build
 | Central `config/projects.yml` | Onboard projects without touching their codebase; `.codereview.yml` in repo can override |
 | Graceful analyzer failures | If Semgrep or AI fails, task continues with the other's results |
 | Semgrep findings AI-verified before posting (`semgrep_ai_verify`) | Cuts static-analysis false positives; fails open (keeps findings unfiltered) if verification errors out — a verification hiccup must never hide a real finding |
+| PR_CONTEXT sent with every AI request | Without the PR description, Jira ticket and the repo's CLAUDE.md the model can only match generic patterns; every source is best-effort and capped by `AI_PR_CONTEXT_MAX_CHARS` |
+| Whole files packed into AI requests (`AI_MAX_DIFF_TOKENS`) | One request per file made the model judge a service without its DTO/repository from the same PR; diff order keeps a package together |
+| AI findings verified by a second AI pass (`ai_verify`) | The reviewer over-reports; a skeptical pass on the same material drops unproven findings. Fails open, and CRITICAL is dropped only with a concrete reason |
 | Dynamic per-PR time limits + deadline-aware AI chunks | Bitbucket webhooks carry no file list, so limits scale by the real diffstat (fetched at enqueue); the AI chunk loop stops before the Celery soft limit and returns partial findings — the build status always gets finalized instead of the worker being SIGKILLed mid-review (stuck "in progress") |
 
 ## Roadmap

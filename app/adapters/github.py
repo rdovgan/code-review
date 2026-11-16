@@ -75,6 +75,7 @@ class GithubAdapter(GitPlatform):
             diff="",
             changed_files=[],
             is_new_pr=is_new_pr,
+            description=pr.get("body") or "",
         )
 
     def get_diff(self, pr_context: PRContext) -> str:

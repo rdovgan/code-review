@@ -60,6 +60,7 @@ class GitlabAdapter(GitPlatform):
             diff="",
             changed_files=[],
             is_new_pr=action == "open",
+            description=attrs.get("description") or "",
         )
 
     def get_diff(self, pr_context: PRContext) -> str:

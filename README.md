@@ -220,11 +220,13 @@ If nothing appears after 30 seconds: `docker compose logs --tail=50 worker`
 | `ai_review` | bool | `true` | Run the Claude AI analyzer |
 | `static_analysis` | bool | `true` | Run Semgrep |
 | `semgrep_ai_verify` | bool | `true` | Re-check each Semgrep finding with AI and drop ones judged to be false positives before posting (fails open — keeps findings unfiltered if verification errors out) |
+| `ai_verify` | bool | `true` | Second AI pass that tries to refute each AI finding on the same material and drops the refuted ones (fails open). Roughly doubles AI cost for requests that produced findings |
+| `ai_context_files` | list | `[CLAUDE.md]` | Repo files read at the target branch and sent to the AI as the project's conventions. Missing files are skipped |
 | `block_merge_on` | list | `[CRITICAL]` | Severity levels that set build status to FAILED |
 | `max_diff_lines` | int | `500` | Max diff lines analyzed (ignored files excluded first); the rest is cut at file/hunk boundaries and listed in the summary |
 | `ignore_paths` | list | `[]` | Glob patterns — matching files produce no findings |
 | `semgrep_rules` | list | `[owasp, security-audit]` | Rule packs: `owasp`, `security-audit`, `p/java`, `p/csharp`, `p/php`, `p/javascript`, `p/python`, `p/django`, `p/flask` |
-| `ai_focus` | list | `[security, bugs]` | Hints passed to the AI prompt |
+| `ai_focus` | list | `[security, bugs]` | What the team wants the AI to concentrate on: `security`, `bugs`, `performance`, or free text (e.g. `billing rules`) |
 | `target_branches` | list | `[master, main]` | Only review PRs targeting these branches |
 | `slack_channel` | string | `""` | Slack channel for notifications (Phase 3, not yet active) |
 
@@ -372,9 +374,16 @@ nano .env
 ANTHROPIC_API_KEY=sk-ant-...
 AI_MODEL=claude-sonnet-5-5
 AI_MAX_TOKENS=16000
-AI_MAX_DIFF_TOKENS=8000
+AI_MAX_DIFF_TOKENS=60000
 AI_FILE_CONTEXT_MAX_CHARS=120000
+AI_PR_CONTEXT_MAX_CHARS=40000
 AI_DAILY_TOKEN_BUDGET=10000000
+
+# Optional: the Jira ticket whose key is in the source branch (or PR title) is sent to
+# the AI as the intent of the change. Read-only access is enough.
+JIRA_BASE_URL=https://your-org.atlassian.net
+JIRA_EMAIL=code-review-bot@your-org.com
+JIRA_API_TOKEN=...
 
 REDIS_URL=redis://redis:6379/0
 
@@ -836,10 +845,14 @@ config/
 └── projects.yml              # central per-project settings registry
 
 prompts/
-├── java_prompt.md
+├── review_base.md     # shared review rules, severity, evidence rule, JSON schema
+├── java_prompt.md     # language pitfalls, appended to review_base.md
 ├── dotnet_prompt.md
 ├── php_prompt.md
-└── js_prompt.md
+├── js_prompt.md
+├── python_prompt.md
+├── verify_ai.md       # second pass that refutes AI findings
+└── verify_semgrep.md  # AI triage of Semgrep findings
 
 tests/
 ├── test_adapters.py
@@ -885,7 +898,7 @@ docker compose up --build
 
 ## How to Add a New Language
 
-1. Create `prompts/<language>_prompt.md` — include language-specific CRITICAL/BUG examples
+1. Create `prompts/<language>_prompt.md` — language-specific pitfalls only; rules and the JSON schema live in `prompts/review_base.md`
 2. Add extension mappings to `_EXT_TO_LANG` in `app/config/project_config.py`
 3. Add a Semgrep rule mapping to `SEMGREP_RULE_MAP` in `app/analyzers/semgrep_runner.py`
 4. Add a quick-reference config block in the Project Configuration section above

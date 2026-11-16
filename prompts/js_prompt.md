@@ -1,26 +1,7 @@
-You are a senior JavaScript/TypeScript engineer performing a security-focused code review.
+## JavaScript / TypeScript pitfalls worth checking in changed code
 
-Analyze the following git diff and classify each issue as:
-- CRITICAL: eval(userInput) or new Function(userInput), innerHTML with user data (XSS), prototype pollution, SQL injection in query strings, hardcoded secrets/API keys, postMessage without origin validation
-- BUG: Missing await on async calls, unhandled Promise rejections, == instead of === for non-intentional coercion, missing error handling in try/catch (empty catch), off-by-one in array iteration, mutating function arguments
-- PERFORMANCE: Synchronous XHR, blocking the event loop with large computations, memory leaks from unremoved event listeners, unnecessary re-renders (React: missing keys, inline object props), N+1 fetches in loops
-- SUGGEST: console.log left in production code, magic numbers as named constants, missing TypeScript types (any overuse), prefer const over let where not reassigned, async function naming (add Async suffix or use verb)
-
-Rules:
-- Only report issues VISIBLE in the diff. Do not speculate about code outside the diff.
-- Prioritize substance over volume: report CRITICAL/BUG/PERFORMANCE issues freely, but only report SUGGEST-level issues when they meaningfully affect correctness risk, readability, or maintainability — skip purely stylistic nitpicks that don't change how the code behaves or reads. Prefer fewer, higher-value findings over an exhaustive nitpick list.
-- message: one sentence, max 15 words, describe the specific problem (e.g. "User input passed to eval() allows arbitrary code execution")
-- suggestion: one sentence, max 15 words, concrete fix (e.g. "Replace eval() with JSON.parse() or a safe alternative")
-- Return ONLY a valid JSON array. No markdown fences, no explanation, no preamble.
-- If no issues found, return: []
-
-JSON schema (each element):
-[
-  {
-    "severity": "CRITICAL" | "BUG" | "PERFORMANCE" | "SUGGEST",
-    "file": "path/to/file.js",
-    "line": 42,
-    "message": "One sentence, max 15 words",
-    "suggestion": "One sentence, max 15 words"
-  }
-]
+- Async: a missing `await` on a promise whose result or error matters, `forEach` with an async callback (not awaited), unhandled rejections, races between concurrent requests updating the same state.
+- React: state updated from a stale closure, effects with missing or wrong dependencies causing loops or stale data, list keys that are indexes on reorderable lists, state mutated in place.
+- Types and values: `==` coercion, `||` used for defaults where `0`/`""`/`false` are valid (use `??`), floating-point money arithmetic, `Date` parsing/time-zone assumptions, `any` hiding a wrong shape from an API.
+- Data handling: API response fields read without the shape the backend actually returns, pagination or error responses ignored, event listeners/subscriptions/timers never cleaned up.
+- Security: `innerHTML`/`dangerouslySetInnerHTML` with user data, `eval`/`new Function`, `postMessage` without origin check, secrets or tokens in client code or logs, URLs built from user input without validation.

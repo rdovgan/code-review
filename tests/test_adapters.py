@@ -63,6 +63,14 @@ def test_bitbucket_parse_created():
     assert ctx.platform == "bitbucket"
     assert ctx.source_branch == "feature/auth"
     assert ctx.target_branch == "main"
+    assert ctx.description == ""  # fixture has none; None/missing must not break parsing
+
+
+def test_bitbucket_parse_reads_description():
+    adapter = _make_adapter()
+    payload = json.loads((FIXTURES / "bitbucket_payload.json").read_text())
+    payload["pullrequest"]["description"] = "Implements BP-1: login via SSO"
+    assert adapter.parse_webhook(payload).description == "Implements BP-1: login via SSO"
 
 
 def test_bitbucket_parse_ignored_event():

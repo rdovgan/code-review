@@ -14,6 +14,7 @@ from app.analyzers.merger import filter_by_config, merge_findings
 from app.analyzers.semgrep_runner import SemgrepRunner
 from app.config.project_config import detect_language, load_project_config
 from app.config.settings import get_settings
+from app.context.review_context import gather_review_context
 from app.metrics import Metrics
 from app.models import PRContext, Severity
 from app.notifiers import mattermost
@@ -128,7 +129,7 @@ _MM_MAX_COMMIT_LEN = 72
 
 
 def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str, critical_count: int,
-                       bug_count: int, summary_comment_id: str = "") -> None:
+                       bug_count: int, summary_comment_id: str = "", commits: list[str] | None = None) -> None:
     if not settings.MATTERMOST_WEBHOOK_URL or not config.notify_authors:
         return
     if not pr_context.is_new_pr:
@@ -146,13 +147,8 @@ def _notify_mattermost(adapter, pr_context: PRContext, config, final_state: str,
         f"{status_emoji} **[{repo_name} / {pr_context.title}]({pr_url})**",
         f"{branch_line} · {pr_context.author}",
     ]
-    # Commit list is best-effort — a fetch failure must not block the notification
-    try:
-        commits = adapter.get_pr_commits(pr_context)
-    except Exception as exc:
-        logger.warning("[PR #%s %s] Failed to fetch commits for Mattermost notification: %s",
-                       pr_context.pr_id, pr_context.repo_full_name, exc)
-        commits = []
+    if commits is None:
+        commits = _fetch_commits(adapter, pr_context)
     if commits:
         lines.append("")
         for c in commits[:_MM_MAX_COMMITS]:
@@ -215,6 +211,15 @@ def _file_list(paths: list[str]) -> str:
     if len(paths) > _MAX_LISTED_FILES:
         listed += f" and {len(paths) - _MAX_LISTED_FILES} more"
     return listed
+
+
+def _fetch_commits(adapter, pr_context: PRContext) -> list[str]:
+    """Best-effort: a fetch failure must not block the review or the notification."""
+    try:
+        return adapter.get_pr_commits(pr_context)
+    except Exception as exc:
+        logger.warning("[PR #%s %s] Failed to fetch commits: %s", pr_context.pr_id, pr_context.repo_full_name, exc)
+        return []
 
 
 def _fetch_file_contents(adapter, pr_context: PRContext, paths: list[str]) -> dict[str, str | None]:
@@ -299,6 +304,16 @@ def _run_review(self, task_payload: dict) -> dict:
         review_files = [fd.path for fd in split_diff_by_file(pr_context.diff)]
         file_contents = _fetch_file_contents(adapter, pr_context, review_files)
 
+    # What the change is meant to do (PR description, commits, Jira ticket) and the repo's
+    # own guide — fetched once, sent with every AI request
+    commits = _fetch_commits(adapter, pr_context)
+    review_context = ""
+    if config.ai_review:
+        try:
+            review_context = gather_review_context(adapter, pr_context, config, settings, commits)
+        except Exception as exc:
+            logger.warning("%s Failed to gather PR context, reviewing without it: %s", pr_tag, exc)
+
     semgrep_results = []
     ai_results = []
     ai_reviewer = None
@@ -341,7 +356,8 @@ def _run_review(self, task_payload: dict) -> dict:
                 timelimit = getattr(self.request, "timelimit", None)
                 if timelimit and len(timelimit) == 2 and timelimit[1]:
                     deadline = time.monotonic() + timelimit[1]
-                ai_results = ai_reviewer.review(pr_context, config, deadline=deadline, file_contents=file_contents)
+                ai_results = ai_reviewer.review(pr_context, config, deadline=deadline, file_contents=file_contents,
+                                                context=review_context)
                 stop_reason = getattr(ai_results, "stop_reason", None)
                 if stop_reason:
                     ai_incomplete_reason = _AI_STOP_REASONS.get(stop_reason, stop_reason)
@@ -350,7 +366,8 @@ def _run_review(self, task_payload: dict) -> dict:
                         "%s Step 2/2: AI review incomplete (%s) — %d/%d chunk(s) reviewed",
                         pr_tag, ai_incomplete_reason, ai_results.chunks_reviewed, ai_results.chunks_total,
                     )
-                logger.info("%s Step 2/2: AI review complete — %d finding(s)", pr_tag, len(ai_results))
+                logger.info("%s Step 2/2: AI review complete — %d finding(s), %d dropped by verification",
+                            pr_tag, len(ai_results), getattr(ai_results, "dropped_by_verification", 0))
             except Exception as exc:
                 logger.error("%s Step 2/2: AI review failed — %s", pr_tag, exc)
                 ai_incomplete_reason = f"AI review failed: {type(exc).__name__}"
@@ -437,7 +454,8 @@ def _run_review(self, task_payload: dict) -> dict:
     adapter.set_review_status(pr_context, final_state, status_description)
 
     try:
-        _notify_mattermost(adapter, pr_context, config, final_state, critical_count, bug_count, summary_comment_id)
+        _notify_mattermost(adapter, pr_context, config, final_state, critical_count, bug_count, summary_comment_id,
+                           commits=commits)
     except Exception as exc:
         logger.warning("%s Failed to send Mattermost notification: %s", pr_tag, exc)
 

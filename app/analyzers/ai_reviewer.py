@@ -17,23 +17,14 @@ logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts"
 
-_GENERIC_PROMPT = """You are a senior software engineer performing a security-focused code review.
+# Shared rules + output schema; <language>_prompt.md adds language pitfalls on top
+_BASE_PROMPT_FILE = "review_base.md"
 
-Analyze the following git diff and classify each issue as:
-- CRITICAL: Security vulnerabilities (injection, auth bypass, RCE, data leaks)
-- BUG: Logic errors, null dereferences, resource leaks, race conditions
-- PERFORMANCE: N+1 queries, blocking I/O, unnecessary allocations
-- SUGGEST: Naming, readability, best practices
-
-Rules:
-- Only report issues VISIBLE in the diff.
-- Prioritize substance over volume: report CRITICAL/BUG/PERFORMANCE issues freely, but only report SUGGEST-level issues when they meaningfully affect correctness risk, readability, or maintainability — skip purely stylistic nitpicks that don't change how the code behaves or reads.
-- Prefer fewer, higher-value findings. If a change has no real issues, return [] rather than inventing minor nits to fill the response.
-- Return ONLY a valid JSON array. No markdown fences, no explanation.
-- If no issues found, return: []
-
-JSON schema: [{"severity": "...", "file": "...", "line": 42, "message": "...", "suggestion": "..."}]
-"""
+_AI_FOCUS_HINTS = {
+    "security": "security issues the change introduces",
+    "bugs": "incorrect behavior and broken business logic",
+    "performance": "real performance costs on realistic paths",
+}
 
 
 class AIReviewResult(list):
@@ -50,6 +41,8 @@ class AIReviewResult(list):
         self.chunks_total = chunks_total
         self.chunks_reviewed = chunks_reviewed
         self.stop_reason = stop_reason
+        # Findings the verification pass judged false positives and dropped
+        self.dropped_by_verification = 0
 
     @property
     def complete(self) -> bool:
@@ -95,14 +88,25 @@ class AIReviewer:
         except Exception:
             pass
 
-    def _load_prompt(self, language: str) -> str:
-        prompt_file = _PROMPTS_DIR / f"{language}_prompt.md"
-        if prompt_file.exists():
-            return prompt_file.read_text()
-        return _GENERIC_PROMPT
+    def _record_ai_verification(self, field: str, amount: int = 1) -> None:
+        try:
+            self._redis.hincrby(Metrics.AI_VERIFY_KEY, field, amount)
+        except Exception:
+            pass
 
-    def _load_verify_prompt(self) -> str:
-        return (_PROMPTS_DIR / "verify_semgrep.md").read_text()
+    def _load_prompt(self, language: str, focus: Optional[list[str]] = None) -> str:
+        """Read on every review so prompt tuning needs no restart."""
+        parts = [(_PROMPTS_DIR / _BASE_PROMPT_FILE).read_text()]
+        language_file = _PROMPTS_DIR / f"{language}_prompt.md"
+        if language_file.exists():
+            parts.append(language_file.read_text())
+        if focus:
+            hints = [_AI_FOCUS_HINTS.get(str(f).lower(), str(f)) for f in focus]
+            parts.append("## Team focus\n\nThis team asked for the review to concentrate on: " + "; ".join(hints) + ".")
+        return "\n\n".join(parts)
+
+    def _load_verify_prompt(self, name: str = "verify_semgrep.md") -> str:
+        return (_PROMPTS_DIR / name).read_text()
 
     def _split_by_file(self, diff: str) -> list[str]:
         chunks = []
@@ -117,10 +121,25 @@ class AIReviewer:
         return chunks if chunks else [diff]
 
     def _split_if_needed(self, diff: str) -> list[str]:
-        approx_tokens = len(diff) // 4
-        if approx_tokens <= self._settings.AI_MAX_DIFF_TOKENS:
+        """Whole files packed into requests of up to AI_MAX_DIFF_TOKENS, in diff order.
+
+        Diff order is path order, so files of one package/feature tend to land in the
+        same request — the model sees a service and its DTO/repository together instead
+        of judging each file blind. A file bigger than the limit gets a request of its own.
+        """
+        max_chars = self._settings.AI_MAX_DIFF_TOKENS * 4
+        if len(diff) <= max_chars:
             return [diff]
-        return self._split_by_file(diff)
+        chunks: list[str] = []
+        current = ""
+        for file_diff in self._split_by_file(diff):
+            if current and len(current) + len(file_diff) > max_chars:
+                chunks.append(current)
+                current = ""
+            current += file_diff
+        if current:
+            chunks.append(current)
+        return chunks
 
     def _parse_response(self, text: str) -> Optional[list]:
         """Parsed JSON array, or None if the response isn't one ([] is a valid "no issues")."""
@@ -219,6 +238,10 @@ class AIReviewer:
     # can still merge findings, post comments and finalize the build status.
     _DEADLINE_RESERVE_SECONDS = 60
 
+    def _build_request(self, chunk: str, file_contents: dict[str, Optional[str]], context: str) -> str:
+        request = self._with_file_context(chunk, file_contents)
+        return f"{context}\n\n---\n{request}" if context else request
+
     def _with_file_context(self, chunk: str, file_contents: dict[str, Optional[str]]) -> str:
         """Prepend the full new version of the chunk's files (line-numbered) to the diff.
 
@@ -250,8 +273,9 @@ class AIReviewer:
         )
 
     def review(self, pr_context: PRContext, config: ReviewConfig, deadline: Optional[float] = None,
-               file_contents: Optional[dict[str, Optional[str]]] = None) -> AIReviewResult:
-        prompt = self._load_prompt(pr_context.language)
+               file_contents: Optional[dict[str, Optional[str]]] = None, context: str = "") -> AIReviewResult:
+        """context: the PR_CONTEXT block (intent + repo guides), sent with every request."""
+        prompt = self._load_prompt(pr_context.language, config.ai_focus)
         chunks = self._split_if_needed(pr_context.diff)
         result = AIReviewResult(chunks_total=len(chunks))
         if len(chunks) > self._MAX_CHUNKS:
@@ -290,11 +314,8 @@ class AIReviewer:
                 result.stop_reason = "parse_failures"
                 break
             try:
-                request = self._with_file_context(chunk, file_contents or {})
-                if self._provider == "glm":
-                    text, input_tokens, output_tokens = self._call_glm(prompt, request)
-                else:
-                    text, input_tokens, output_tokens = self._call_claude(prompt, request)
+                request = self._build_request(chunk, file_contents or {}, context)
+                text, input_tokens, output_tokens = self._call(prompt, request)
                 self._check_and_record_tokens(input_tokens, output_tokens)
                 logger.debug("AI raw response (chunk %d/%d): %s", i + 1, len(chunks), text)
                 items = self._parse_response(text)
@@ -304,10 +325,12 @@ class AIReviewer:
                     continue
                 consecutive_parse_failures = 0
                 result.chunks_reviewed += 1
-                for item in items:
-                    f = self._validate_finding(item) if isinstance(item, dict) else None
-                    if f:
-                        result.append(f)
+                chunk_findings = [f for f in (self._validate_finding(item) for item in items if isinstance(item, dict)) if f]
+                if chunk_findings and config.ai_verify:
+                    kept = self._verify_ai_findings(chunk_findings, request, deadline)
+                    result.dropped_by_verification += len(chunk_findings) - len(kept)
+                    chunk_findings = kept
+                result.extend(chunk_findings)
             except Exception as exc:
                 logger.error("AI review chunk failed: %s", exc)
                 consecutive_parse_failures += 1
@@ -315,6 +338,71 @@ class AIReviewer:
         if result.stop_reason is None and failed_chunks:
             result.stop_reason = "errors"
         return result
+
+    def _call(self, prompt: str, request: str) -> tuple[str, int, int]:
+        if self._provider == "glm":
+            return self._call_glm(prompt, request)
+        return self._call_claude(prompt, request)
+
+    @staticmethod
+    def _confirmed_indexes(items: Optional[list], count: int) -> Optional[set[int]]:
+        """Indexes with a CONFIRMED verdict, or None when the response holds no usable verdicts."""
+        if not items:
+            return None
+        confirmed: set[int] = set()
+        judged = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            verdict = str(item.get("verdict", "")).upper()
+            if not isinstance(idx, int) or not 0 <= idx < count or verdict not in ("CONFIRMED", "FALSE_POSITIVE"):
+                continue
+            judged += 1
+            if verdict == "CONFIRMED":
+                confirmed.add(idx)
+        return confirmed if judged else None
+
+    def _verify_ai_findings(self, findings: list[Finding], request: str, deadline: Optional[float]) -> list[Finding]:
+        """Second pass over the same material that tries to refute each finding.
+
+        Fails open (keeps the findings) when there is no time or budget left, or the
+        call or its response fails — verification must never hide a finding by accident.
+        """
+        if deadline is not None and time.monotonic() > deadline - self._DEADLINE_RESERVE_SECONDS:
+            logger.warning("No time left to verify %d AI finding(s), keeping them unverified", len(findings))
+            self._record_ai_verification("fail_open")
+            return findings
+        if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
+            used = int(self._redis.get(self._budget_key()) or 0)
+            if used >= self._settings.AI_DAILY_TOKEN_BUDGET:
+                logger.warning("Daily AI token budget reached, keeping %d AI finding(s) unverified", len(findings))
+                self._record_ai_verification("fail_open")
+                return findings
+
+        payload = [
+            {"index": i, "severity": f.severity.value, "file": f.file, "line": f.line,
+             "message": f.message, "suggestion": f.suggestion}
+            for i, f in enumerate(findings)
+        ]
+        verify_request = f"{request}\n\n---\nREVIEW_FINDINGS_JSON:\n{json.dumps(payload)}"
+        try:
+            text, input_tokens, output_tokens = self._call(self._load_verify_prompt("verify_ai.md"), verify_request)
+            self._check_and_record_tokens(input_tokens, output_tokens)
+            confirmed = self._confirmed_indexes(self._parse_response(text), len(findings))
+        except Exception as exc:
+            logger.error("AI finding verification failed, keeping findings unverified: %s", exc)
+            confirmed = None
+        if confirmed is None:
+            logger.warning("AI finding verification gave no usable verdicts, keeping %d finding(s)", len(findings))
+            self._record_ai_verification("fail_open")
+            return findings
+
+        kept = [f for i, f in enumerate(findings) if i in confirmed]
+        self._record_ai_verification("kept", len(kept))
+        self._record_ai_verification("dropped", len(findings) - len(kept))
+        logger.info("AI finding verification kept %d/%d finding(s)", len(kept), len(findings))
+        return kept
 
     def verify_semgrep_findings(self, findings: list[Finding], pr_context: PRContext) -> list[Finding]:
         """Re-check Semgrep findings with AI and drop ones it judges to be false positives.
@@ -347,10 +435,7 @@ class AIReviewer:
         prompt = self._load_verify_prompt()
 
         try:
-            if self._provider == "glm":
-                text, input_tokens, output_tokens = self._call_glm(prompt, chunk)
-            else:
-                text, input_tokens, output_tokens = self._call_claude(prompt, chunk)
+            text, input_tokens, output_tokens = self._call(prompt, chunk)
             self._check_and_record_tokens(input_tokens, output_tokens)
             items = self._parse_response(text)
         except Exception as exc:

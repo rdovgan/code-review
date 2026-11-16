@@ -27,6 +27,24 @@ _AI_FOCUS_HINTS = {
 }
 
 
+def _count(obj, name: str) -> int:
+    value = getattr(obj, name, 0) if obj is not None else 0
+    return value if isinstance(value, int) else 0
+
+
+def claude_input_tokens(usage) -> tuple[int, int]:
+    """(input incl. cache writes, cache reads) — Anthropic reports the three separately."""
+    return (_count(usage, "input_tokens") + _count(usage, "cache_creation_input_tokens"),
+            _count(usage, "cache_read_input_tokens"))
+
+
+def openai_input_tokens(usage) -> tuple[int, int]:
+    """(uncached input, cached input) — OpenAI-compatible APIs (GLM) count cached inside prompt_tokens."""
+    prompt = _count(usage, "prompt_tokens")
+    cached = _count(getattr(usage, "prompt_tokens_details", None), "cached_tokens")
+    return prompt - cached, cached
+
+
 class AIReviewResult(list):
     """Findings of one AI review plus how much of the diff was actually reviewed.
 
@@ -54,6 +72,7 @@ class AIReviewer:
         self._settings = settings
         self._redis = redis.from_url(settings.REDIS_URL)
         self._last_truncated = False  # the last call hit max_tokens (set by _call_claude/_call_glm)
+        self._last_cached = 0         # input tokens of the last call served from the prompt cache
 
         provider = settings.AI_PROVIDER.lower()
         if provider == "glm":
@@ -67,20 +86,31 @@ class AIReviewer:
     def _budget_key(self) -> str:
         return f"{Metrics.AI_TOKENS_TODAY_PREFIX}:{date.today().isoformat()}"
 
-    def _check_and_record_tokens(self, input_tokens: int, output_tokens: int) -> bool:
-        """Returns False if daily budget is exceeded. Always records usage."""
+    def _weighted(self, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> int:
+        """Tokens as the budget counts them: cache reads at AI_CACHED_TOKEN_WEIGHT."""
+        return input_tokens + output_tokens + round(cached_tokens * self._settings.AI_CACHED_TOKEN_WEIGHT)
+
+    def _check_and_record_tokens(self, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> bool:
+        """Returns False if daily budget is exceeded. Always records usage.
+
+        input_tokens excludes cache reads; cached_tokens are recorded separately (metric kind
+        "cached") and count toward the budget at AI_CACHED_TOKEN_WEIGHT.
+        """
         budget = self._settings.AI_DAILY_TOKEN_BUDGET
         key = self._budget_key()
-        total = input_tokens + output_tokens
+        total = self._weighted(input_tokens, output_tokens, cached_tokens)
         new_count = self._redis.incrby(key, total)
         self._redis.expire(key, 86400 * 2)  # keep 2 days for visibility
         self._redis.hincrby(Metrics.AI_TOKENS_BY_PROVIDER_KEY, f"{self._provider}:input", input_tokens)
         self._redis.hincrby(Metrics.AI_TOKENS_BY_PROVIDER_KEY, f"{self._provider}:output", output_tokens)
+        if cached_tokens:
+            self._redis.hincrby(Metrics.AI_TOKENS_BY_PROVIDER_KEY, f"{self._provider}:cached", cached_tokens)
         if budget > 0 and (new_count - total) >= budget:
             logger.warning("Daily AI token budget (%d) exceeded: %d used today", budget, new_count)
             self._redis.incr(Metrics.AI_BUDGET_EXCEEDED_KEY)
             return False
-        logger.info("AI tokens used: input=%d output=%d daily_total=%d", input_tokens, output_tokens, new_count)
+        logger.info("AI tokens used: input=%d cached=%d output=%d daily_total=%d",
+                    input_tokens, cached_tokens, output_tokens, new_count)
         return True
 
     def _record_verify_fail_open(self) -> None:
@@ -223,7 +253,8 @@ class AIReviewer:
             logger.warning("AI response hit max_tokens=%d — JSON is likely truncated", self._settings.AI_MAX_TOKENS)
         # Thinking blocks come before the answer — read only the text blocks
         text = "".join(block.text for block in response.content if block.type == "text")
-        return text, response.usage.input_tokens, response.usage.output_tokens
+        input_tokens, self._last_cached = claude_input_tokens(response.usage)
+        return text, input_tokens, response.usage.output_tokens
 
     def _call_glm(self, prompt: str, chunk: str) -> tuple[str, int, int]:
         response = self._client.chat.completions.create(
@@ -245,7 +276,8 @@ class AIReviewer:
                 finish_reason, self._settings.GLM_MODEL,
             )
             text = ""
-        return text, response.usage.prompt_tokens, response.usage.completion_tokens
+        input_tokens, self._last_cached = openai_input_tokens(response.usage)
+        return text, input_tokens, response.usage.completion_tokens
 
     # Circuit breaker: stop AI review after N consecutive parse failures
     _MAX_CONSECUTIVE_PARSE_FAILURES = 2
@@ -336,7 +368,7 @@ class AIReviewer:
             try:
                 request = self._build_request(chunk, file_contents or {}, context)
                 text, input_tokens, output_tokens = self._call(prompt, request)
-                self._check_and_record_tokens(input_tokens, output_tokens)
+                self._check_and_record_tokens(input_tokens, output_tokens, self._last_cached)
                 logger.debug("AI raw response (chunk %d/%d): %s", i + 1, len(chunks), text)
                 items = self._parse_response(text)
                 if items is None and self._last_truncated:
@@ -372,6 +404,7 @@ class AIReviewer:
 
     def _call(self, prompt: str, request: str) -> tuple[str, int, int]:
         self._last_truncated = False
+        self._last_cached = 0
         if self._provider == "glm":
             return self._call_glm(prompt, request)
         return self._call_claude(prompt, request)
@@ -420,7 +453,7 @@ class AIReviewer:
         verify_request = f"{request}\n\n---\nREVIEW_FINDINGS_JSON:\n{json.dumps(payload)}"
         try:
             text, input_tokens, output_tokens = self._call(self._load_verify_prompt("verify_ai.md"), verify_request)
-            self._check_and_record_tokens(input_tokens, output_tokens)
+            self._check_and_record_tokens(input_tokens, output_tokens, self._last_cached)
             confirmed = self._confirmed_indexes(self._parse_response(text), len(findings))
         except Exception as exc:
             logger.error("AI finding verification failed, keeping findings unverified: %s", exc)
@@ -468,7 +501,7 @@ class AIReviewer:
 
         try:
             text, input_tokens, output_tokens = self._call(prompt, chunk)
-            self._check_and_record_tokens(input_tokens, output_tokens)
+            self._check_and_record_tokens(input_tokens, output_tokens, self._last_cached)
             items = self._parse_response(text)
         except Exception as exc:
             logger.error("Semgrep AI verification call failed, keeping findings unverified: %s", exc)

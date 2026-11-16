@@ -13,7 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from app.analyzers.ai_reviewer import _PROMPTS_DIR, AIReviewer, AIReviewResult
+from app.analyzers.ai_reviewer import (_PROMPTS_DIR, AIReviewer, AIReviewResult, claude_input_tokens,
+                                       openai_input_tokens)
 from app.context.code_tools import TOOL_SCHEMAS, CodeTools
 from app.models import PRContext, ReviewConfig
 from app.utils.diff_parser import split_diff_by_file
@@ -25,6 +26,15 @@ _AGENT_PROMPT_FILE = "agent_review.md"
 _MAX_AGENT_CHUNKS = 3
 # Seconds kept for the final "answer now" call after the loop stops
 _FINAL_ANSWER_RESERVE_SECONDS = 90
+
+# Sent once when the agent answers before it has looked at the code
+_INVESTIGATE_FIRST = (
+    "You answered after {calls} code lookup(s). This review is only useful if it checks the change "
+    "against the code around it. Before your final answer: grep the callers of every method, endpoint "
+    "or event whose signature or behavior this diff changes (in this repository and the related ones), "
+    "and read the definitions of the types and methods the change relies on. Keep only findings the "
+    "code confirms. Then reply with the JSON array."
+)
 
 _FINAL_ANSWER_REQUEST = (
     "Your tool budget for this review is used up. Do not call any more tools. "
@@ -46,9 +56,10 @@ class _ToolCall:
 
 
 class _Turn:
-    def __init__(self, text: str, tool_calls: list[_ToolCall], input_tokens: int, output_tokens: int) -> None:
+    def __init__(self, text: str, tool_calls: list[_ToolCall], input_tokens: int, output_tokens: int,
+                 cached_tokens: int = 0) -> None:
         self.text, self.tool_calls = text, tool_calls
-        self.input_tokens, self.output_tokens = input_tokens, output_tokens
+        self.input_tokens, self.output_tokens, self.cached_tokens = input_tokens, output_tokens, cached_tokens
 
 
 class _OpenAIChat:
@@ -86,8 +97,8 @@ class _OpenAIChat:
                     for tc in message.tool_calls
                 ],
             })
-        usage = response.usage
-        return _Turn(message.content or "", calls, usage.prompt_tokens, usage.completion_tokens)
+        input_tokens, cached = openai_input_tokens(response.usage)  # Z.AI caches repeated prefixes itself
+        return _Turn(message.content or "", calls, input_tokens, response.usage.completion_tokens, cached)
 
     def add_results(self, messages: list[dict], results: list[tuple[_ToolCall, str]]) -> None:
         for call, output in results:
@@ -95,6 +106,9 @@ class _OpenAIChat:
 
     def add_user(self, messages: list[dict], text: str) -> None:
         messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, messages: list[dict], text: str) -> None:
+        messages.append({"role": "assistant", "content": text})
 
 
 class _ClaudeChat:
@@ -108,12 +122,32 @@ class _ClaudeChat:
     def start(self, user_text: str) -> list[dict]:
         return [{"role": "user", "content": user_text}]
 
+    @staticmethod
+    def _with_cache_breakpoint(messages: list[dict]) -> list[dict]:
+        """The conversation with a cache breakpoint on its last block.
+
+        Each agent step re-sends the whole conversation; with the breakpoint moving to the
+        newest message, every step reads everything before it from the prompt cache
+        (~0.1× the price) instead of paying for it again. Only a copy is marked, so at most
+        two breakpoints (system + last message) are ever sent.
+        """
+        marked = list(messages)
+        last = dict(marked[-1])
+        content = last["content"]
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else [
+            dict(b) if isinstance(b, dict) else b for b in content]
+        if blocks and isinstance(blocks[-1], dict):
+            blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+        last["content"] = blocks
+        marked[-1] = last
+        return marked
+
     def call(self, system: str, messages: list[dict]) -> _Turn:
         response = self._client.beta.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            system=system,
-            messages=messages,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=self._with_cache_breakpoint(messages),
             tools=self._tools,
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
@@ -124,7 +158,8 @@ class _ClaudeChat:
         if calls:
             messages.append({"role": "assistant", "content": response.content})
         text = "".join(b.text for b in response.content if b.type == "text")
-        return _Turn(text, calls, response.usage.input_tokens, response.usage.output_tokens)
+        input_tokens, cached = claude_input_tokens(response.usage)
+        return _Turn(text, calls, input_tokens, response.usage.output_tokens, cached)
 
     def add_results(self, messages: list[dict], results: list[tuple[_ToolCall, str]]) -> None:
         messages.append({"role": "user", "content": [
@@ -133,6 +168,9 @@ class _ClaudeChat:
 
     def add_user(self, messages: list[dict], text: str) -> None:
         messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, messages: list[dict], text: str) -> None:
+        messages.append({"role": "assistant", "content": text or "[]"})
 
 
 class AgentReviewer(AIReviewer):
@@ -201,6 +239,8 @@ class AgentReviewer(AIReviewer):
         messages = chat.start(user_text)
         steps = 0
         forced = False
+        nudged = False
+        min_calls = max(0, self._settings.AGENT_MIN_TOOL_CALLS)
         while True:
             out_of_time = deadline is not None and time.monotonic() > deadline - _FINAL_ANSWER_RESERVE_SECONDS
             if not forced and (steps >= max_steps or token_budget["left"] <= 0 or out_of_time):
@@ -219,8 +259,8 @@ class AgentReviewer(AIReviewer):
                 raise
             except Exception as exc:
                 raise AgentReviewFailed(f"AI request failed: {type(exc).__name__}") from exc
-            self._check_and_record_tokens(turn.input_tokens, turn.output_tokens)
-            token_budget["left"] -= turn.input_tokens + turn.output_tokens
+            self._check_and_record_tokens(turn.input_tokens, turn.output_tokens, turn.cached_tokens)
+            token_budget["left"] -= self._weighted(turn.input_tokens, turn.output_tokens, turn.cached_tokens)
 
             if turn.tool_calls:
                 if forced:
@@ -234,6 +274,13 @@ class AgentReviewer(AIReviewer):
                 chat.add_results(messages, results)
                 continue
 
+            if steps < min_calls and not nudged and not forced:
+                # It answered from the diff alone — that is the diff review, not what agentic is for
+                logger.info("Agent answered after %d code lookup(s); asking it to check the code first", steps)
+                chat.add_assistant(messages, turn.text)
+                chat.add_user(messages, _INVESTIGATE_FIRST.format(calls=steps))
+                nudged = True
+                continue
             items = self._parse_response(turn.text)
             if items is None:
                 raise AgentReviewFailed("agent's answer was not valid JSON")

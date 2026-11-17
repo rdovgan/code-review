@@ -65,6 +65,11 @@ class Settings(BaseSettings):
 
     # Mattermost Incoming Webhook URL for author-based PR notifications
     MATTERMOST_WEBHOOK_URL: str = ""
+    # Operator alerts to the same channel (limits hit, budget, degraded reviews): one message
+    # per alert per this many hours; 0 turns them off
+    ALERT_REPEAT_HOURS: float = 24
+    # Alert when the daily AI token budget is this % used (once a day), and again at 100%
+    AI_BUDGET_ALERT_PERCENT: int = 80
 
 
 @lru_cache

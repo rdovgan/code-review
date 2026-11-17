@@ -136,6 +136,7 @@ docker compose up --build
 | Own tool loop instead of an agent SDK | Must run on GLM (OpenAI-compatible) as well as Claude |
 | Agent sent back once if it answers with < `AGENT_MIN_TOOL_CALLS` lookups | Agentic exists to check the change against the code; an answer from the diff alone is just a pricier diff review |
 | Prompt caching in the agent loop; cache reads weighted in the budget (`AI_CACHED_TOKEN_WEIGHT`) | Each step re-sends the conversation; caching keeps depth affordable, and the budget should track cost, not raw tokens |
+| Operator alerts in the Mattermost channel, deduplicated in Redis (`alert:<kind>:<repo>`, `ALERT_REPEAT_HOURS`) | Limits and fallbacks only show up in logs otherwise; one message per repo and kind keeps the channel readable when every PR hits the same limit |
 | Shadow review is a separate Celery task | It can fail or time out without touching the posted review's build status (the failure signals are bound to `process_review` only) |
 | Deadline taken at task start | Time spent fetching, in Semgrep and in the agent counts against the soft limit, so the fallback never runs past it |
 | Dynamic per-PR time limits + deadline-aware AI chunks | Bitbucket webhooks carry no file list, so limits scale by the real diffstat (fetched at enqueue); the AI chunk loop stops before the Celery soft limit and returns partial findings — the build status always gets finalized instead of the worker being SIGKILLed mid-review (stuck "in progress") |

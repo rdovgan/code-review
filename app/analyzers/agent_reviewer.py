@@ -41,6 +41,13 @@ _FINAL_ANSWER_REQUEST = (
     "Reply now with the final JSON array of findings only (or [] if none are confirmed)."
 )
 
+# Sent once when the final answer is not a JSON array (models drift into prose after many tool calls)
+_JSON_ONLY = (
+    "Your last reply was not a JSON array, so it cannot be used. Do not call any more tools and do not "
+    "explain. Reply with the findings from your review as a JSON array only, in the schema from the "
+    "instructions, starting with `[` and ending with `]` (or [] if none are confirmed)."
+)
+
 
 class AgentReviewFailed(Exception):
     """The agentic review produced no usable result; reason is a short, user-facing phrase."""
@@ -201,13 +208,15 @@ class AgentReviewer(AIReviewer):
         system = self._agent_prompt(pr_context.language, config.ai_focus, max_steps)
         result = AIReviewResult(chunks_total=len(chunks))
         result.tool_calls = 0
+        result.limits_hit = set()  # "steps" / "tokens" / "time": the agent was stopped before it was done
         token_budget = {"left": self._settings.AGENT_MAX_TOKENS_PER_REVIEW}
 
         for i, chunk in enumerate(chunks):
             header = f"{context}\n\n---\n" if context else ""
             part = f" (part {i + 1} of {len(chunks)})" if len(chunks) > 1 else ""
             user_text = f"{header}{tools.describe()}\n\n---\nDIFF{part}:\n{chunk}"
-            findings = self._converse(system, user_text, tools, max_steps, token_budget, deadline)
+            findings = self._converse(system, user_text, tools, max_steps, token_budget, deadline,
+                                      result.limits_hit)
             result.extend(self._only_diff_files(findings, chunk))
             result.chunks_reviewed += 1
         result.tool_calls = tools.calls
@@ -234,12 +243,13 @@ class AgentReviewer(AIReviewer):
         return chunks + ([current] if current else [])
 
     def _converse(self, system: str, user_text: str, tools: CodeTools, max_steps: int,
-                  token_budget: dict, deadline: Optional[float]) -> list:
+                  token_budget: dict, deadline: Optional[float], limits_hit: Optional[set] = None) -> list:
         chat = self._chat()
         messages = chat.start(user_text)
         steps = 0
         forced = False
         nudged = False
+        asked_for_json = False
         min_calls = max(0, self._settings.AGENT_MIN_TOOL_CALLS)
         while True:
             out_of_time = deadline is not None and time.monotonic() > deadline - _FINAL_ANSWER_RESERVE_SECONDS
@@ -248,6 +258,8 @@ class AgentReviewer(AIReviewer):
                             steps, token_budget["left"], out_of_time)
                 chat.add_user(messages, _FINAL_ANSWER_REQUEST)
                 forced = True
+                if limits_hit is not None:
+                    limits_hit.add("time" if out_of_time else "steps" if steps >= max_steps else "tokens")
             if deadline is not None and time.monotonic() > deadline:
                 raise AgentReviewFailed("agent ran out of time")
             if not self._budget_left():
@@ -283,6 +295,13 @@ class AgentReviewer(AIReviewer):
                 continue
             items = self._parse_response(turn.text)
             if items is None:
-                raise AgentReviewFailed("agent's answer was not valid JSON")
+                if asked_for_json:
+                    raise AgentReviewFailed("agent's answer was not valid JSON")
+                # One more cheap turn (the conversation is cached) beats losing all the lookups
+                logger.info("Agent's answer was not a JSON array (%d chars); asking for JSON only", len(turn.text))
+                chat.add_assistant(messages, turn.text)
+                chat.add_user(messages, _JSON_ONLY)
+                asked_for_json = forced = True
+                continue
             logger.info("Agent answered after %d tool call(s)", steps)
             return [f for f in (self._validate_finding(it) for it in items if isinstance(it, dict)) if f]

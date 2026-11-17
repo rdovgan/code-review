@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from dataclasses import asdict
 
@@ -11,6 +12,7 @@ from celery.signals import task_failure, task_retry, task_revoked
 
 from app.adapters.factory import get_adapter
 from app.analyzers.agent_reviewer import AgentReviewer, AgentReviewFailed
+from app.notifiers.alerts import send_alert
 from app.analyzers.ai_reviewer import AIReviewer
 from app.analyzers.merger import filter_by_config, merge_findings
 from app.analyzers.semgrep_runner import SemgrepRunner
@@ -380,6 +382,7 @@ def _run_review(self, task_payload: dict) -> dict:
                                         f"({getattr(ai_results, 'tool_calls', 0)} code lookups).")
                     logger.info("%s Step 2/2: Agentic review complete — %d finding(s), %d code lookup(s)",
                                 pr_tag, len(ai_results), getattr(ai_results, "tool_calls", 0))
+                    _alert_agent_limits(pr_context, config, ai_results)
                 except SoftTimeLimitExceeded:
                     raise
                 except Exception as exc:
@@ -387,6 +390,9 @@ def _run_review(self, task_payload: dict) -> dict:
                     logger.warning("%s Step 2/2: Agentic review failed (%s) — falling back to diff review", pr_tag, reason)
                     metrics.record_agentic("fallback")
                     review_mode_note = f"> ℹ️ Deep review unavailable ({reason}); this is the standard diff review."
+                    _alert(pr_context, f"agent_failed:{re.sub(r'[0-9]+', 'N', reason)}",
+                           "deep review fell back to the diff review",
+                           f"Reason: {reason}. The PR was reviewed the standard way.")
                     ai_results = []
 
             if not agentic_done:
@@ -556,9 +562,40 @@ def _diff_ai_review(ai_reviewer, pr_context: PRContext, config, deadline, file_c
         reviewed_nothing = getattr(ai_results, "chunks_reviewed", 0) == 0
         logger.warning("%s Step 2/2: AI review incomplete (%s) — %d/%d chunk(s) reviewed",
                        pr_tag, incomplete_reason, ai_results.chunks_reviewed, ai_results.chunks_total)
+        if stop_reason != "budget":  # the budget has its own alert
+            _alert(pr_context, f"ai_incomplete:{stop_reason}", "AI review incomplete",
+                   f"{incomplete_reason}: {ai_results.chunks_reviewed} of {ai_results.chunks_total} part(s) "
+                   "of the diff reviewed.")
     logger.info("%s Step 2/2: AI review complete — %d finding(s), %d dropped by verification",
                 pr_tag, len(ai_results), getattr(ai_results, "dropped_by_verification", 0))
     return ai_results, incomplete_reason, reviewed_nothing
+
+
+_LIMIT_ADVICE = {
+    "steps": ("used all {steps} tool calls (`agent_max_steps`)",
+              "Raise `agent_max_steps` for this repository in config/projects.yml if it keeps happening."),
+    "tokens": ("used its token allowance for one review (`AGENT_MAX_TOKENS_PER_REVIEW`)",
+               "Raise `AGENT_MAX_TOKENS_PER_REVIEW` in .env, or lower `agent_max_steps`."),
+    "time": ("ran out of time",
+             "Big PRs in this repository may need fewer `agent_max_steps` or `review_mode: diff`."),
+}
+
+
+def _alert(pr_context: PRContext, kind: str, title: str, details: str) -> None:
+    """One alert per repository and kind per ALERT_REPEAT_HOURS, with a link to the PR that hit it."""
+    repo = pr_context.repo_full_name
+    pr_url = _pr_url(pr_context)
+    pr_ref = f"[PR #{pr_context.pr_id}]({pr_url})" if pr_url else f"PR #{pr_context.pr_id}"
+    send_alert(settings, f"{kind}:{repo}", f"{title} — {repo.split('/')[-1]}",
+               f"{pr_ref} {pr_context.title}\n{details}")
+
+
+def _alert_agent_limits(pr_context: PRContext, config, ai_results) -> None:
+    for limit in sorted(getattr(ai_results, "limits_hit", ()) or ()):
+        what, advice = _LIMIT_ADVICE[limit]
+        _alert(pr_context, f"agent_limit:{limit}", "deep review stopped early",
+               f"The agent {what.format(steps=config.agent_max_steps)} before it finished checking the change. "
+               f"Its findings so far were posted. {advice}")
 
 
 def _remaining(deadline: float) -> float:

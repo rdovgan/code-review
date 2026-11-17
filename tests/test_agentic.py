@@ -1135,3 +1135,19 @@ def test_glm_tool_turns_think_off_by_default():
                       side_effect=[_glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING)]) as create:
         agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
     assert all(c.kwargs["extra_body"] == {"thinking": {"type": "disabled"}} for c in create.call_args_list)
+
+
+def test_agent_logs_what_it_checked_and_its_answer(caplog):
+    import logging
+    agent = _agent()
+    tools = MagicMock(calls=2)
+    tools.run.side_effect = ["src/A.java:3: x\nsrc/B.java:9: x", "ERROR: file not found: Nope.java"]
+    responses = [_claude(_tool_use("a", "grep", {"pattern": "total\\(", "repo": "ws/lib"}),
+                         _tool_use("b", "read_file", {"path": "Nope.java", "start_line": 1, "end_line": 40})),
+                 _claude(_text("Callers pass a non-null currency; nothing to report.\n[]"))]
+    with caplog.at_level(logging.INFO, logger="app.analyzers.agent_reviewer"), \
+         patch.object(agent._client.beta.messages, "create", side_effect=responses):
+        agent.review_agentic(_ctx(), ReviewConfig(), tools)
+    text = caplog.text
+    assert 'grep "total\\(" (ws/lib) → 2 lines; read Nope.java:1-40 → error' in text
+    assert "found no issues (part=1); its answer: Callers pass a non-null currency; nothing to report. []" in text

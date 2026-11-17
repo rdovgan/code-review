@@ -74,6 +74,44 @@ class CallResult:
     elapsed: float = 0.0
 
 
+_SEVERITY_ALIASES = {
+    **{s.value: s for s in Severity},
+    "BLOCKER": Severity.CRITICAL, "SECURITY": Severity.CRITICAL,
+    "HIGH": Severity.BUG, "MAJOR": Severity.BUG, "ERROR": Severity.BUG,
+    "PERF": Severity.PERFORMANCE,
+    "SUGGESTION": Severity.SUGGEST, "MEDIUM": Severity.SUGGEST, "MINOR": Severity.SUGGEST,
+    "LOW": Severity.SUGGEST, "INFO": Severity.SUGGEST, "STYLE": Severity.SUGGEST,
+}
+
+
+def glm_thinking_kwargs(settings: Settings) -> dict:
+    """Request kwargs that turn GLM thinking off (GLM_THINKING=disabled, the default).
+
+    Thinking made every GLM request slow: agent tool turns took 2-5 s without reasoning and
+    60-150 s with 5-7k reasoning tokens; whole reviews ran past their time limits.
+    """
+    if settings.GLM_THINKING.strip().lower() == "disabled":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
+
+
+def _first_json_array(text: str) -> Optional[list]:
+    decoder = json.JSONDecoder()
+    first = None
+    for match in re.finditer(r"\[", text):
+        try:
+            value, _ = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, list):
+            continue
+        if value and all(isinstance(v, dict) for v in value):
+            return value
+        if first is None:
+            first = value
+    return first
+
+
 class AIReviewResult(list):
     """Findings of one AI review plus how much of the diff was actually reviewed.
 
@@ -284,14 +322,13 @@ class AIReviewer:
             text = fenced.group(1).strip()
         elif text.startswith("```"):  # opening fence without a closing one (cut off)
             text = "\n".join(text.splitlines()[1:])
-        # Try to extract JSON array from mixed text (e.g. "Here is the result:\n[...")
-        if text.startswith("[") is False:
-            start = text.find("[")
-            if start != -1:
-                end = text.rfind("]")
-                if end > start:
-                    text = text[start : end + 1]
-                    logger.info("Extracted JSON array from mixed AI response")
+        # Mixed text ("Here is the result:\n[...]", prose with brackets around it): take the
+        # array that parses — first one of objects, else the first one — not first "[" to last "]"
+        if not text.startswith(("[", "{")):
+            found = _first_json_array(text)
+            if found is not None:
+                logger.info("Extracted JSON array from mixed AI response")
+                return found
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
@@ -307,22 +344,32 @@ class AIReviewer:
         return parsed
 
     def _validate_finding(self, item: dict) -> Optional[Finding]:
-        required = {"severity", "file", "line", "message", "suggestion"}
-        if not required.issubset(item.keys()):
-            return None
-        try:
-            severity = Severity(item["severity"])
-            line = int(item["line"])
-        except (ValueError, TypeError):
+        """A Finding from one answer item, tolerant of the usual drift in key names and values
+        (models with thinking off write "path", "bug", "12-14", no suggestion)."""
+        severity = _SEVERITY_ALIASES.get(str(item.get("severity", "")).strip().upper())
+        file = next((str(item[k]) for k in ("file", "path", "filename", "file_path") if item.get(k)), "")
+        file = file.strip().removeprefix("a/").removeprefix("b/").lstrip("/")
+        message = next((str(item[k]) for k in ("message", "description", "issue", "problem") if item.get(k)), "")
+        line_match = re.match(r"\s*(\d+)", str(item.get("line", "")))
+        if severity is None or not file or not message or not line_match:
             return None
         return Finding(
             severity=severity,
-            file=str(item["file"]),
-            line=line,
-            message=str(item["message"]),
-            suggestion=str(item["suggestion"]),
+            file=file,
+            line=int(line_match.group(1)),
+            message=message,
+            suggestion=str(item.get("suggestion") or item.get("fix") or ""),
             source="ai",
         )
+
+    def _validate_findings(self, items: list) -> list:
+        findings = [f for f in (self._validate_finding(it) for it in items if isinstance(it, dict)) if f]
+        if len(findings) < len(items):
+            sample = next((it for it in items if not (isinstance(it, dict) and self._validate_finding(it))), None)
+            keys = sorted(sample) if isinstance(sample, dict) else type(sample).__name__
+            logger.warning("Dropped %d of %d AI finding(s) that did not fit the schema (e.g. keys %s)",
+                           len(items) - len(findings), len(items), keys)
+        return findings
 
     def _call_claude(self, prompt: str, chunk: str, timeout: float) -> CallResult:
         # Security-review diffs can trip a model's safety classifier; "default" fallbacks
@@ -357,6 +404,7 @@ class AIReviewer:
                 {"role": "user", "content": chunk},
             ],
             timeout=timeout,
+            **glm_thinking_kwargs(self._settings),
         )
         choice = response.choices[0]
         text = choice.message.content
@@ -511,7 +559,7 @@ class AIReviewer:
                     continue
                 consecutive_parse_failures = 0
                 result.chunks_reviewed += 1
-                chunk_findings = [f for f in (self._validate_finding(item) for item in items if isinstance(item, dict)) if f]
+                chunk_findings = self._validate_findings(items)
                 if chunk_findings:
                     pending.append((i, request, chunk_findings, res.elapsed))
             except RequestTimedOut as exc:

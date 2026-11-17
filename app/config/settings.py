@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     # GLM thinking for the forced final answer and the JSON re-ask only: auto (turn it off,
     # detect if Z.AI ignores or rejects that) | disabled | enabled
     GLM_ANSWER_THINKING: str = "auto"
+    # GLM thinking for every other request (agent tool turns, diff review, verification):
+    # disabled (default: answers in seconds, a little less depth) | enabled (model default, slow)
+    GLM_THINKING: str = "disabled"
 
     # Jira (optional) — the ticket whose key is in the source branch or PR title is
     # sent to the AI as the change's intent. Empty JIRA_BASE_URL disables it.

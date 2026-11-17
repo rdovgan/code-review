@@ -909,7 +909,7 @@ def _glm_agent():
 
 
 def test_glm_answer_disables_thinking_only_on_forced_calls():
-    agent = _glm_agent()
+    agent = _agent(_settings(AI_PROVIDER="glm", ZAI_API_KEY="z", GLM_THINKING="enabled"))
     tools = MagicMock(calls=1)
     tools.run.return_value = "ok"
     with patch.object(agent._client.chat.completions, "create",
@@ -1125,3 +1125,13 @@ def test_glm_400_also_without_thinking_param_keeps_thinking_state(send):
     # The 400 was not about the switch: thinking-off stays on, no alert
     assert not agent_mod._glm_thinking_param_rejected and agent._final_reserve() == 120
     send.assert_not_called()
+
+
+def test_glm_tool_turns_think_off_by_default():
+    agent = _glm_agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    with patch.object(agent._client.chat.completions, "create",
+                      side_effect=[_glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING)]) as create:
+        agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    assert all(c.kwargs["extra_body"] == {"thinking": {"type": "disabled"}} for c in create.call_args_list)

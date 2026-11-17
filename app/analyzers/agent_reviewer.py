@@ -166,11 +166,12 @@ class _OpenAIChat:
 
     def __init__(self, client, model: str, max_tokens: int, thinking_mode: str = "auto",
                  on_thinking_unsupported: Optional[Callable[[str], None]] = None,
-                 on_slow_answer: Optional[Callable[[str], None]] = None) -> None:
+                 on_slow_answer: Optional[Callable[[str], None]] = None, turns_thinking_off: bool = False) -> None:
         self._client, self._model, self._max_tokens = client, model, max_tokens
         self._thinking_mode = thinking_mode.lower()
         self._on_thinking_unsupported = on_thinking_unsupported
         self._on_slow_answer = on_slow_answer
+        self._turns_thinking_off = turns_thinking_off
         self._tools = [{"type": "function", "function": s} for s in TOOL_SCHEMAS]
 
     def start(self, user_text: str) -> list[dict]:
@@ -192,14 +193,17 @@ class _OpenAIChat:
 
     def call(self, system: str, messages: list[dict], bounds: _Bounds, answer: bool = False) -> _Turn:
         global _glm_thinking_param_rejected, _glm_slowest_answer
-        thinking_off = answer and _glm_thinking_off(self._thinking_mode)
+        if answer:
+            thinking_off = _glm_thinking_off(self._thinking_mode)
+        else:  # tool turns: GLM_THINKING (thinking took 60-150 s per turn, without it 2-5 s)
+            thinking_off = self._turns_thinking_off and not _glm_thinking_param_rejected
         started = time.monotonic()
         try:
             response = bounds.call(lambda t: self._send(system, messages, t, thinking_off))
         except RequestTimedOut as exc:
             # A final answer that did not arrive: keep sending thinking-off (Z.AI honours it),
             # but give later answers the longest reserve
-            if thinking_off and exc.sent and _glm_slowest_answer < _GLM_ANSWER_RESERVE_THINKING_ON:
+            if answer and thinking_off and exc.sent and _glm_slowest_answer < _GLM_ANSWER_RESERVE_THINKING_ON:
                 _glm_slowest_answer = float(_GLM_ANSWER_RESERVE_THINKING_ON)
                 logger.warning("GLM final answer did not arrive within %.0fs; the final-answer reserve is %ds "
                                "from now on", exc.timeout, _GLM_ANSWER_RESERVE_THINKING_ON)
@@ -214,7 +218,7 @@ class _OpenAIChat:
             # nothing about the thinking switch.
             response = bounds.call(lambda t: self._send(system, messages, t, False))
             _glm_thinking_param_rejected = True
-            logger.warning("Z.AI rejected thinking-off for the final answer (%s); answers think from now on",
+            logger.warning("Z.AI rejected thinking-off (%s); requests think from now on",
                            type(exc).__name__)
             if self._on_thinking_unsupported is not None:
                 self._on_thinking_unsupported(f"rejected: {type(exc).__name__}")
@@ -223,7 +227,7 @@ class _OpenAIChat:
         choice = response.choices[0]
         message = choice.message
         reasoning = openai_reasoning_tokens(response.usage)
-        if thinking_off:
+        if answer and thinking_off:
             elapsed = time.monotonic() - started
             if elapsed > _glm_slowest_answer:
                 _glm_slowest_answer = elapsed
@@ -360,7 +364,8 @@ class AgentReviewer(AIReviewer):
         if self._provider == "glm":
             return _OpenAIChat(self._client, self._settings.GLM_MODEL, max_tokens,
                                self._settings.GLM_ANSWER_THINKING, self._alert_thinking_unsupported,
-                               self._alert_slow_answer)
+                               self._alert_slow_answer,
+                               turns_thinking_off=self._settings.GLM_THINKING.strip().lower() == "disabled")
         return _ClaudeChat(self._client, self._settings.AI_MODEL, max_tokens)
 
     def _alert_thinking_unsupported(self, how: str) -> None:
@@ -647,4 +652,4 @@ class AgentReviewer(AIReviewer):
                 continue
             waited = f", {time.monotonic() - asked_at:.0f}s after it was asked" if asked_at else ""
             logger.info("Agent answered (part=%d) after %d code lookup(s)%s", part, steps, waited)
-            return [f for f in (self._validate_finding(it) for it in items if isinstance(it, dict)) if f], steps
+            return self._validate_findings(items), steps

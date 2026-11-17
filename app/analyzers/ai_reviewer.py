@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from datetime import date
 from pathlib import Path
@@ -190,14 +191,12 @@ class AIReviewer:
         if not text:
             logger.warning("AI returned empty response")
             return None
-        if text.startswith("```"):
-            lines = text.splitlines()
-            # Remove opening fence (```json or ```)
-            lines = lines[1:]
-            # Remove closing fence
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines)
+        # A fenced block anywhere: "Summary of the review ...\n```json\n[...]\n```"
+        fenced = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+        elif text.startswith("```"):  # opening fence without a closing one (cut off)
+            text = "\n".join(text.splitlines()[1:])
         # Try to extract JSON array from mixed text (e.g. "Here is the result:\n[...")
         if text.startswith("[") is False:
             start = text.find("[")
@@ -211,6 +210,10 @@ class AIReviewer:
         except json.JSONDecodeError:
             logger.warning("Failed to parse AI response as JSON (first 500 chars): %s", text[:500])
             return None
+        if isinstance(parsed, dict):  # {"findings": [...]}
+            lists = [v for v in parsed.values() if isinstance(v, list)]
+            if len(lists) == 1:
+                return lists[0]
         if not isinstance(parsed, list):
             logger.warning("AI response is JSON but not an array: %s", text[:200])
             return None

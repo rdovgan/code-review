@@ -294,7 +294,7 @@ def test_agent_is_asked_for_an_answer_when_steps_run_out():
 
 
 @pytest.mark.parametrize("responses, reason", [
-    ([_claude(_text("not json"))], "not valid JSON"),
+    ([_claude(_text("not json")), _claude(_text("still prose"))], "not valid JSON"),
     ([_claude(stop="refusal")], "declined"),
     (RuntimeError("api down"), "AI request failed"),
 ])
@@ -304,6 +304,36 @@ def test_agent_failures_raise_for_fallback(responses, reason):
     with patch.object(agent._client.beta.messages, "create", **kwargs):
         with pytest.raises(AgentReviewFailed, match=reason):
             agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+
+
+def test_agent_answering_in_prose_is_asked_once_for_json():
+    agent = _agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    responses = [_claude(_tool_use("a", "grep", {"pattern": "x"})),
+                 _claude(_text("I checked the callers; the rate can be zero for comp bookings.")),
+                 _claude(_text(FINDING))]
+    with patch.object(agent._client.beta.messages, "create", side_effect=responses) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(), tools)
+    assert [f.line for f in result] == [2]
+    last = create.call_args_list[2].kwargs["messages"]
+    assert last[-2]["role"] == "assistant" and "not a JSON array" in _sent_text(last[-1])
+
+
+def test_agent_asked_for_json_may_not_call_tools_again():
+    agent = _agent()
+    responses = [_claude(_text("prose")), _claude(_tool_use("a", "grep", {"pattern": "x"}))]
+    with patch.object(agent._client.beta.messages, "create", side_effect=responses):
+        with pytest.raises(AgentReviewFailed, match="kept calling tools"):
+            agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+
+
+@pytest.mark.parametrize("text", [
+    "Summary of what I checked.\n\n```json\n" + FINDING + "\n```\nDone.",
+    json.dumps({"findings": json.loads(FINDING)}),
+])
+def test_findings_are_read_from_wrapped_answers(text):
+    assert _agent()._parse_response(text) == json.loads(FINDING)
 
 
 def test_agent_refuses_too_large_diffs_and_exhausted_budget():

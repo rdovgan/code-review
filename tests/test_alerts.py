@@ -91,3 +91,13 @@ def test_worker_alerts_once_per_repo_and_limit_with_advice(send):
     (_, key, title, details), _ = send.call_args
     assert key == "agent_limit:steps:ws/admin-portal" and "admin-portal" in title
     assert "all 20 tool calls" in details and "agent_max_steps" in details and "PR #52" in details
+
+
+@patch("app.notifiers.alerts.mattermost.send_message", return_value=True)
+def test_alerts_go_to_their_own_channel_when_set(send):
+    send_alert(_settings(MATTERMOST_ALERTS_WEBHOOK_URL="https://mm.example/hooks/ops"), "k1", "t", "", _FakeRedis())
+    send_alert(_settings(), "k2", "t", "", _FakeRedis())
+    send_alert(_settings(MATTERMOST_WEBHOOK_URL="", MATTERMOST_ALERTS_WEBHOOK_URL="https://mm.example/hooks/ops"),
+               "k3", "t", "", _FakeRedis())
+    assert [c.args[0] for c in send.call_args_list] == [
+        "https://mm.example/hooks/ops", "https://mm.example/hooks/x", "https://mm.example/hooks/ops"]

@@ -76,7 +76,8 @@ chmod 600 .env config/credentials.yml
 | `AI_REQUEST_TIMEOUT_SECONDS` | `420` | Read timeout cap for one diff, verify or final-answer request; requests near the task deadline get less, and a request that cannot finish in time is not sent. A multi-file request that times out is split in two |
 | `AI_PR_CONTEXT_MAX_CHARS` | `40000` | PR description + commits + Jira ticket + repo guide; `0` disables |
 | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | empty | Optional. Ticket key is taken from the branch name or PR title. Use a read-only account or a token with the `read:jira-work` scope |
-| `MATTERMOST_WEBHOOK_URL` | empty | Optional. Message on new PRs by authors listed in `notify_authors`, plus operator alerts to the same channel: AI budget at `AI_BUDGET_ALERT_PERCENT` and used up, the agent stopped by `agent_max_steps` / token limits, deep review falling back fully or for some parts, GLM rejecting thinking-off, AI review incomplete. The agent's time limit is a summary note and a metric, not an alert |
+| `MATTERMOST_WEBHOOK_URL` | empty | Optional. Message on new PRs by authors listed in `notify_authors`, plus operator alerts unless `MATTERMOST_ALERTS_WEBHOOK_URL` is set: AI budget at `AI_BUDGET_ALERT_PERCENT` and used up, the agent stopped by `agent_max_steps` / token limits, deep review falling back fully or for some parts, GLM rejecting thinking-off, AI review incomplete. The agent's time limit is a summary note and a metric, not an alert |
+| `MATTERMOST_ALERTS_WEBHOOK_URL` | empty | Optional. Separate channel for operator alerts (limits, budget, fallbacks, GLM issues), so they don't go to the team's PR channel |
 | `ALERT_REPEAT_HOURS` | `24` | Each alert (per repo and kind) is posted at most once per this period; `0` turns alerts off |
 | `AI_BUDGET_ALERT_PERCENT` | `80` | Share of `AI_DAILY_TOKEN_BUDGET` that triggers the early budget alert |
 | `REDIS_PASSWORD` | — | Set your own |

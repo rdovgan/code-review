@@ -512,3 +512,143 @@ def test_process_review_retries_on_httpx_transport_errors():
     from app.workers.celery_app import process_review
 
     assert httpx.TransportError in process_review.autoretry_for
+
+
+# --- time budget (PR #52) ---
+
+import threading  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from celery.exceptions import SoftTimeLimitExceeded  # noqa: E402
+
+PART_A = "diff --git a/src/A.java b/src/A.java\n--- a/src/A.java\n+++ b/src/A.java\n@@ -1 +1 @@\n-a\n+b\n"
+PART_B = "diff --git a/src/B.java b/src/B.java\n--- a/src/B.java\n+++ b/src/B.java\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+def _agentic_payload():
+    ctx = _make_pr_context(diff=PART_A + PART_B, changed_files=["src/A.java", "src/B.java"])
+    return {"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx)}
+
+
+@patch("app.workers.celery_app.metrics")
+@patch("app.workers.celery_app._alert")
+@patch("app.workers.celery_app.gather_review_context", return_value="")
+@patch("app.workers.celery_app._agentic_review")
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.load_project_config")
+def test_agentic_partial_diff_reviews_only_unreviewed_files(mock_config, mock_ai_cls, mock_get_adapter, mock_agentic,
+                                                            _gather, mock_alert, mock_metrics):
+    from app.analyzers.ai_reviewer import AIReviewResult
+    from app.workers.celery_app import process_review
+
+    adapter = MagicMock()
+    adapter.get_existing_bot_comments.return_value = []
+    mock_get_adapter.return_value = adapter
+    mock_config.return_value = ReviewConfig(review_mode="agentic", static_analysis=False)
+    agent_res = AIReviewResult([Finding(Severity.BUG, "src/A.java", 1, "a", "s", source="ai")],
+                               chunks_total=2, chunks_reviewed=1)
+    agent_res.tool_calls = 7
+    agent_res.unreviewed_diff, agent_res.failed_parts = PART_B, 1
+    agent_res.failed_part_numbers, agent_res.failure_reason = [2], "no time left for this part"
+    mock_agentic.return_value = agent_res
+    mock_ai_cls.return_value.review.return_value = AIReviewResult(
+        [Finding(Severity.BUG, "src/B.java", 1, "b", "s", source="ai")], chunks_total=1, chunks_reviewed=1)
+
+    result = process_review.run(_agentic_payload())
+
+    sub = mock_ai_cls.return_value.review.call_args.args[0]
+    assert sub.diff == PART_B  # only the failed part's files, not the whole diff again
+    assert result["status"] == "success" and result["findings"] == 2
+    summary = adapter.post_summary_comment.call_args.args[1]
+    assert "Deep review covered 1 of 2 parts (7 code lookups)" in summary
+    assert "no time left for this part" in summary
+    kind, title, details = mock_alert.call_args.args[1:]
+    assert kind == "agent_partial:no time left for this part" and "partly fell back" in title
+    assert details.startswith("Part(s) 2 of 2")
+    mock_metrics.record_agentic.assert_called_once_with("partial")
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_soft_time_limit_sets_stopped_and_returns(*mocks):
+    result, adapter, mock_release = _run_with(*mocks, SoftTimeLimitExceeded())
+    # Returned, not raised: on_task_failure would overwrite the status with "Review failed"
+    assert result == {"status": "stopped", "reason": "soft_time_limit"}
+    state, description = adapter.set_review_status.call_args_list[-1].args[1:]
+    assert state == "stopped" and "time limit" in description
+    mock_release.assert_called_once()
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_semgrep_runs_in_background_and_join_timeout_adds_note(mock_config, mock_semgrep_cls, mock_ai_cls,
+                                                                mock_get_adapter):
+    from app.workers import celery_app
+
+    release = threading.Event()
+    mock_semgrep_cls.return_value.run.side_effect = lambda *a, **k: release.wait(5) and []
+    mock_adapter = MagicMock()
+    mock_adapter.get_existing_bot_comments.return_value = []
+    mock_get_adapter.return_value = mock_adapter
+    mock_config.return_value = ReviewConfig()
+    mock_ai_cls.return_value.review.return_value = []
+
+    ctx = _make_pr_context()
+    celery_app.process_review.request.timelimit = (1005, 885)
+    try:
+        with patch.object(celery_app, "_FINALIZE_RESERVE", 10_000), \
+             patch.object(celery_app, "_STATIC_JOIN_MIN_WAIT", 0.1):
+            result = celery_app.process_review.run({"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx)})
+    finally:
+        celery_app.process_review.request.timelimit = None
+        release.set()
+
+    mock_ai_cls.return_value.review.assert_called_once()  # ran while Semgrep was still busy
+    assert result["status"] == "success"
+    assert "Static analysis did not finish in time" in mock_adapter.post_summary_comment.call_args.args[1]
+
+
+@patch("app.workers.celery_app.metrics")
+@patch("app.workers.celery_app.send_alert")
+def test_time_limit_hit_records_metric_without_alert(send, mock_metrics):
+    from app.workers import celery_app
+    ctx = _make_pr_context()
+    notes = celery_app._alert_agent_limits(ctx, ReviewConfig(), SimpleNamespace(limits_hit={"time"}))
+    send.assert_not_called()
+    mock_metrics.record_agent_limit.assert_called_once_with("time")
+    assert notes and "time limit" in notes[0]
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_unverified_note_in_summary(*mocks):
+    from app.analyzers.ai_reviewer import AIReviewResult
+
+    ai_result = AIReviewResult([_make_finding(Severity.BUG)], chunks_total=1, chunks_reviewed=1)
+    ai_result.unverified = 1
+    _, adapter, _ = _run_with(*mocks, ai_result)
+    assert "1 AI finding(s) were not double-checked (time limit)" in adapter.post_summary_comment.call_args.args[1]
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_enqueued_at_is_not_passed_to_pr_context(*mocks):
+    import time
+    mock_config, mock_semgrep_cls, mock_ai_cls, mock_get_adapter = mocks
+    mock_get_adapter.return_value = MagicMock(**{"get_existing_bot_comments.return_value": []})
+    mock_config.return_value = ReviewConfig(static_analysis=False)
+    mock_ai_cls.return_value.review.return_value = []
+    from app.workers.celery_app import process_review
+    ctx = _make_pr_context()
+    payload = {"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx), "enqueued_at": time.time() - 30}
+    assert process_review.run(payload)["status"] == "success"
+    assert "enqueued_at" in payload  # the task payload itself is left alone (retries reuse it)

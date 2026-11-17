@@ -538,3 +538,226 @@ def test_http_client_request_lines_are_not_logged():
     import logging
     import app.workers.celery_app  # noqa: F401  (configures the loggers on import)
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
+# --- bounded requests (PR #52: one diff request waited 7.5+ minutes with no timeout) ---
+
+import time  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from celery.exceptions import SoftTimeLimitExceeded  # noqa: E402
+
+from app.analyzers.ai_calls import RequestTimedOut, call_bounded, classify_error  # noqa: E402
+
+
+class APITimeoutError(Exception):
+    """Named like the SDKs' timeout error: classify_error goes by the class name."""
+
+
+class APIConnectionError(Exception):
+    pass
+
+
+def _status_error(code: int, name: str = "APIStatusError") -> Exception:
+    exc = type(name, (Exception,), {})(f"HTTP {code}")
+    exc.status_code = code
+    return exc
+
+
+def _wrapped_soft_limit() -> Exception:
+    try:
+        try:
+            raise SoftTimeLimitExceeded()
+        except SoftTimeLimitExceeded as inner:
+            raise APIConnectionError("Connection error.") from inner
+    except APIConnectionError as exc:
+        return exc
+
+
+def test_clients_have_timeout_and_no_sdk_retries():
+    claude = AIReviewer(_make_settings())
+    glm_settings = _make_settings()
+    glm_settings.AI_PROVIDER, glm_settings.ZAI_API_KEY = "glm", "z"
+    glm = AIReviewer(glm_settings)
+    for reviewer in (claude, glm):
+        assert reviewer._client.max_retries == 0
+        assert reviewer._client.timeout.read == 420 and reviewer._client.timeout.connect == 10
+
+
+def test_claude_create_gets_timeout_kwarg_with_32k_max_tokens():
+    """Without an explicit timeout the Anthropic SDK refuses a non-streaming 32k request."""
+    import anthropic
+    settings = _make_settings()
+    settings.AI_MAX_TOKENS = 32_000
+    reviewer = _make_reviewer(settings)
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(_make_pr_context(), ReviewConfig(ai_verify=False))
+    assert mock_create.call_args.kwargs["timeout"] == 420
+    # The real SDK call gets past its own checks and fails only on the (closed) port
+    reviewer._client = reviewer._client.with_options(base_url="http://127.0.0.1:9")
+    with pytest.raises(anthropic.APIConnectionError):
+        reviewer._call_claude("system", "diff", 5)
+
+
+def test_classify_error():
+    import anthropic
+    import openai
+    assert classify_error(_status_error(400, "BadRequestError")) == "bad_request"
+    for code in (408, 409, 429, 500, 529):
+        assert classify_error(_status_error(code)) == "transient", code
+    assert classify_error(_status_error(401, "AuthenticationError")) == "fatal"
+    assert classify_error(APITimeoutError()) == "timeout"
+    assert classify_error(APIConnectionError()) == "transient"
+    assert classify_error(_wrapped_soft_limit()) == "soft_limit"
+    assert classify_error(SoftTimeLimitExceeded()) == "soft_limit"
+    assert classify_error(ValueError("x")) == "fatal"
+    # The real SDK classes, both providers
+    assert classify_error(openai.APITimeoutError(request=None)) == "timeout"
+    assert classify_error(anthropic.APITimeoutError(request=None)) == "timeout"
+    assert classify_error(anthropic.APIConnectionError(request=None)) == "transient"
+
+
+@patch("app.analyzers.ai_calls.time.sleep")
+def test_transient_retried_once_timeout_and_soft_limit_never(_sleep):
+    def run(errors):
+        calls = []
+
+        def fn(timeout):
+            calls.append(timeout)
+            if errors:
+                raise errors.pop(0)
+            return "ok"
+
+        try:
+            return call_bounded(fn, deadline=None, reserve=0, cap=420, floor=60, kind="chunk"), len(calls)
+        except BaseException as exc:
+            return exc, len(calls)
+
+    assert run([_status_error(529, "OverloadedError")]) == ("ok", 2)            # Claude overloaded
+    result, calls = run([_status_error(429, "RateLimitError"), _status_error(429, "RateLimitError")])
+    assert calls == 2 and result.status_code == 429                             # GLM: only one retry
+    result, calls = run([APITimeoutError()])
+    assert calls == 1 and isinstance(result, RequestTimedOut) and not result.by_deadline
+    result, calls = run([_wrapped_soft_limit()])
+    assert calls == 1 and isinstance(result, SoftTimeLimitExceeded)
+
+
+@patch("app.analyzers.ai_calls.time.sleep")
+def test_transient_not_retried_without_time_for_it(_sleep):
+    calls = []
+
+    def fn(timeout):
+        calls.append(timeout)
+        raise _status_error(503)
+
+    with pytest.raises(Exception):
+        call_bounded(fn, deadline=time.monotonic() + 150, reserve=90, cap=420, floor=50, kind="chunk")
+    assert len(calls) == 1  # 60 s left, the retry needs 60 + backoff
+
+
+def test_soft_limit_wrapped_in_connection_error_on_semgrep_verify_not_retried():
+    reviewer = _make_reviewer(_make_settings())
+    finding = Finding(severity=Severity.BUG, file="Foo.java", line=1, message="m", suggestion="s", source="semgrep")
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=_wrapped_soft_limit()) as mock_create:
+        with pytest.raises(SoftTimeLimitExceeded):
+            reviewer.verify_semgrep_findings([finding], _make_pr_context())
+    assert mock_create.call_count == 1
+
+
+def test_chunk_timeout_capped_by_deadline():
+    reviewer = _make_reviewer(_make_settings())
+    with patch.object(reviewer._client.beta.messages, "create", return_value=_response("[]")) as mock_create:
+        reviewer.review(_make_pr_context(), ReviewConfig(), deadline=time.monotonic() + 200)
+    assert 100 < mock_create.call_args.kwargs["timeout"] <= 110  # 200 - the 90 s reserve
+
+
+def test_chunk_timeout_at_deadline_stops_with_deadline_and_keeps_partial():
+    reviewer = _make_reviewer(_make_settings())
+    responses = [_response(_finding_json(1)), APITimeoutError("read timeout")]
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=responses) as mock_create:
+        result = reviewer.review(_make_pr_context(diff=_multi_file_diff(3)), ReviewConfig(ai_verify=False),
+                                 deadline=time.monotonic() + 300)
+    assert mock_create.call_count == 2  # the timed-out chunk is not split: the deadline cut it short
+    assert result.stop_reason == "deadline" and result.chunks_reviewed == 1 and [f.line for f in result] == [1]
+
+
+def test_non_deadline_timeout_halves_multi_file_chunk_without_breaker():
+    reviewer = _glm_reviewer()
+    responses = [APITimeoutError("read timeout"), _glm_response("[]"), _glm_response("[]")]
+    with patch.object(reviewer._client.chat.completions, "create", side_effect=responses) as create:
+        result = reviewer.review(_make_pr_context(diff=_multi_file_diff(2)), ReviewConfig(ai_verify=False))
+    assert create.call_count == 3
+    assert result.complete and result.chunks_total == 2 and result.chunks_reviewed == 2
+
+
+def test_soft_limit_inside_chunk_returns_partial_with_deadline():
+    reviewer = _make_reviewer(_make_settings())
+    responses = [_response(_finding_json(1)), SoftTimeLimitExceeded()]
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=responses) as mock_create:
+        result = reviewer.review(_make_pr_context(diff=_multi_file_diff(3)), ReviewConfig())
+    assert mock_create.call_count == 2  # no verification: the task is at its soft limit
+    assert result.stop_reason == "deadline" and [f.line for f in result] == [1] and result.unverified == 1
+
+
+def _per_file_finding(severity: str, file: str) -> str:
+    return json.dumps([{"severity": severity, "file": file, "line": 1, "message": "m", "suggestion": "s"}])
+
+
+def test_verify_runs_after_all_chunks_critical_first():
+    reviewer = _make_reviewer(_make_settings())
+    order = []
+
+    def create(**kw):
+        content = kw["messages"][0]["content"]
+        if "REVIEW_FINDINGS_JSON" in content:
+            order.append("verify:" + json.loads(content.rsplit("REVIEW_FINDINGS_JSON:\n", 1)[1])[0]["file"])
+            return _response('[{"index": 0, "verdict": "CONFIRMED"}]')
+        file = next(f"File{i}.java" for i in range(3) if f"File{i}.java" in content)
+        order.append("review:" + file)
+        answers = {"File0.java": _per_file_finding("BUG", "File0.java"), "File1.java": "[]",
+                   "File2.java": _per_file_finding("CRITICAL", "File2.java")}
+        return _response(answers[file])
+
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=create):
+        result = reviewer.review(_make_pr_context(diff=_multi_file_diff(3)), ReviewConfig())
+    assert order == ["review:File0.java", "review:File1.java", "review:File2.java",
+                     "verify:File2.java", "verify:File0.java"]
+    assert [f.file for f in result] == ["File0.java", "File2.java"]  # posted in diff order
+    assert result.unverified == 0
+
+
+def test_verify_without_time_fails_open_and_counts_unverified():
+    reviewer = _make_reviewer(_make_settings())
+    clock = {"now": 1000.0}
+
+    def create(**kw):
+        clock["now"] += 250  # the review of this chunk took 250 s
+        return _response(_finding_json(1, 2))
+
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=create) as mock_create, \
+         patch("app.analyzers.ai_reviewer.time.monotonic", side_effect=lambda: clock["now"]):
+        result = reviewer.review(_make_pr_context(), ReviewConfig(), deadline=1400.0)
+    # 60 s left before the reserve; a verification as slow as the review would not fit
+    assert mock_create.call_count == 1
+    assert [f.line for f in result] == [1, 2] and result.unverified == 2 and result.complete
+
+
+def test_semgrep_verify_gets_timeout_and_fails_open():
+    reviewer = _make_reviewer(_make_settings())
+    finding = Finding(severity=Severity.BUG, file="Foo.java", line=1, message="m", suggestion="s", source="semgrep")
+    with patch.object(reviewer._client.beta.messages, "create", side_effect=APITimeoutError()) as mock_create:
+        assert reviewer.verify_semgrep_findings([finding], _make_pr_context()) == [finding]
+    assert mock_create.call_args.kwargs["timeout"] == 120
+    with patch.object(reviewer._client.beta.messages, "create") as mock_create:
+        kept = reviewer.verify_semgrep_findings([finding], _make_pr_context(), deadline=time.monotonic() + 10)
+    assert kept == [finding]
+    mock_create.assert_not_called()
+
+
+def test_glm_call_reports_reasoning_tokens_and_finish_reason():
+    reviewer = _glm_reviewer()
+    response = _glm_response("[]")
+    response.usage.completion_tokens_details = SimpleNamespace(reasoning_tokens=900)
+    with patch.object(reviewer._client.chat.completions, "create", return_value=response):
+        res = reviewer._call("system", "diff", kind="chunk")
+    assert res.reasoning_tokens == 900 and res.finish_reason == "stop" and not res.truncated

@@ -16,7 +16,9 @@ Dimensional data is stored as hashes with composite field "label1:label2":
   metrics:ai_tokens_by_provider → {"claude:input": N, "claude:output": N, ...}
   metrics:semgrep_verify → {"kept": N, "dropped": N, "fail_open": N}
   metrics:ai_verify      → {"kept": N, "dropped": N, "fail_open": N}
-  metrics:agentic        → {"ok": N, "fallback": N, "shadow_ok": N, "shadow_failed": N}
+  metrics:agentic        → {"ok": N, "partial": N, "fallback": N, "shadow_ok": N, "shadow_partial": N, "shadow_failed": N}
+  metrics:agent_limits   → {"steps": N, "tokens": N, "time": N}
+  metrics:ai_timeouts    → {"chunk": N, "verify": N, "semgrep_verify": N, "agent_turn": N, "agent_answer": N}
   metrics:semgrep_errors → {"timeout": N, "bad_exit": N, "invalid_json": N}
 
 The `ai_tokens:<date>` key (no "metrics:" prefix, one per day) is owned and written by
@@ -56,7 +58,13 @@ class Metrics:
     # AI findings re-checked by a second AI pass — written by app/analyzers/ai_reviewer.py.
     AI_VERIFY_KEY = "metrics:ai_verify"
     _AGENTIC_KEY = "metrics:agentic"
-    AGENTIC_RESULTS = ("ok", "fallback", "shadow_ok", "shadow_failed")
+    AGENTIC_RESULTS = ("ok", "partial", "fallback", "shadow_ok", "shadow_partial", "shadow_failed")
+    _AGENT_LIMITS_KEY = "metrics:agent_limits"
+    AGENT_LIMITS = ("steps", "tokens", "time")
+    # AI requests that got no answer within their read timeout, by kind — written by
+    # app/analyzers/ai_reviewer.py (AIReviewer._record_timeout).
+    AI_TIMEOUTS_KEY = "metrics:ai_timeouts"
+    AI_TIMEOUT_KINDS = ("chunk", "verify", "semgrep_verify", "agent_turn", "agent_answer")
 
     # Semgrep runner errors — shared with app/analyzers/semgrep_runner.py.
     SEMGREP_ERRORS_KEY = "metrics:semgrep_errors"
@@ -161,9 +169,23 @@ class Metrics:
             pass
 
     def record_agentic(self, result: str) -> None:
-        """result: ok | fallback (agentic mode) | shadow_ok | shadow_failed (shadow mode)"""
+        """result: ok | partial (some parts got the diff review) | fallback (agentic mode) |
+        shadow_ok | shadow_partial | shadow_failed (shadow mode)"""
         try:
             self._r.hincrby(self._AGENTIC_KEY, result, 1)
+        except Exception:
+            pass
+
+    def record_agent_limit(self, limit: str) -> None:
+        """limit: steps | tokens | time — the agent was asked for its answer before it was done"""
+        try:
+            self._r.hincrby(self._AGENT_LIMITS_KEY, limit, 1)
+        except Exception:
+            pass
+
+    def inc_ai_timeout(self, kind: str) -> None:
+        try:
+            self._r.hincrby(self.AI_TIMEOUTS_KEY, kind, 1)
         except Exception:
             pass
 
@@ -210,6 +232,8 @@ class Metrics:
             semgrep_verify = self._r.hgetall(self.SEMGREP_VERIFY_KEY)
             ai_verify = self._r.hgetall(self.AI_VERIFY_KEY)
             agentic = self._r.hgetall(self._AGENTIC_KEY)
+            agent_limits = self._r.hgetall(self._AGENT_LIMITS_KEY)
+            ai_timeouts = self._r.hgetall(self.AI_TIMEOUTS_KEY)
             semgrep_errors = self._r.hgetall(self.SEMGREP_ERRORS_KEY)
             task_retries = int(self._r.get(self._TASK_RETRIES_KEY) or 0)
         except Exception:
@@ -391,6 +415,18 @@ class Metrics:
         ]
         for result in self.AGENTIC_RESULTS:
             lines.append(f'code_review_agentic_total{{result="{result}"}} {agentic.get(result, 0)}')
+        lines += [
+            "# HELP code_review_agent_limits_total Agentic reviews stopped early by a limit",
+            "# TYPE code_review_agent_limits_total counter",
+        ]
+        for limit in self.AGENT_LIMITS:
+            lines.append(f'code_review_agent_limits_total{{limit="{limit}"}} {agent_limits.get(limit, 0)}')
+        lines += [
+            "# HELP code_review_ai_timeouts_total AI requests that got no answer within their read timeout",
+            "# TYPE code_review_ai_timeouts_total counter",
+        ]
+        for kind in self.AI_TIMEOUT_KINDS:
+            lines.append(f'code_review_ai_timeouts_total{{kind="{kind}"}} {ai_timeouts.get(kind, 0)}')
 
         # --- semgrep errors ---
         lines += [

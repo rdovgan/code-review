@@ -150,3 +150,15 @@ def test_queue_review_gives_agentic_repos_extra_time():
     kwargs = mock_apply.call_args.kwargs
     assert kwargs["soft_time_limit"] == _BASE_SOFT_TIME_LIMIT + 2 * _EXTRA_SECONDS_PER_FILE + _AGENTIC_EXTRA_SECONDS
     assert kwargs["time_limit"] == _BASE_TIME_LIMIT + 2 * _EXTRA_SECONDS_PER_FILE + _AGENTIC_EXTRA_SECONDS
+
+
+def test_queue_review_hard_limit_leaves_two_minutes_after_soft_and_stamps_enqueue_time():
+    """The soft limit is a backstop: the task needs time after it to post and set the status."""
+    adapter = MagicMock()
+    ctx = _make_pr_context(changed_files=["a.java"])
+    for mode in ("diff", "agentic"):
+        with patch("app.main.central_review_mode", return_value=mode):
+            _, mock_apply = _run_queue_review(ctx, adapter)
+        kwargs = mock_apply.call_args.kwargs
+        assert kwargs["time_limit"] - kwargs["soft_time_limit"] == 120
+        assert isinstance(kwargs["args"][0]["enqueued_at"], float)

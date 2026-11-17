@@ -2,13 +2,16 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Optional
 
 import anthropic
 import redis
+from celery.exceptions import SoftTimeLimitExceeded
 
+from app.analyzers.ai_calls import RequestTimedOut, call_bounded, timeout_for
 from app.config.settings import Settings
 from app.metrics import Metrics
 from app.models import Finding, PRContext, ReviewConfig, Severity
@@ -47,6 +50,30 @@ def openai_input_tokens(usage) -> tuple[int, int]:
     return prompt - cached, cached
 
 
+def openai_reasoning_tokens(usage) -> int:
+    """Reasoning tokens of a reply (GLM reports them inside completion_tokens)."""
+    return _count(getattr(usage, "completion_tokens_details", None), "reasoning_tokens")
+
+
+# glm-5.3-flash produced ~45 output tokens/s on Z.AI (PR #52): sizes the startup warnings
+_GLM_TOKENS_PER_SECOND = 45
+_GLM_MAX_DIFF_TOKENS_ADVICE = 20_000
+_warned_sizes = False
+
+
+@dataclass
+class CallResult:
+    """One AI request: the answer text plus what it cost and how it ended."""
+    text: str
+    input_tokens: int
+    output_tokens: int
+    cached: int = 0
+    truncated: bool = False
+    finish_reason: Optional[str] = None
+    reasoning_tokens: int = 0
+    elapsed: float = 0.0
+
+
 class AIReviewResult(list):
     """Findings of one AI review plus how much of the diff was actually reviewed.
 
@@ -63,6 +90,23 @@ class AIReviewResult(list):
         self.stop_reason = stop_reason
         # Findings the verification pass judged false positives and dropped
         self.dropped_by_verification = 0
+        # Findings kept without the verification pass because no time was left for it
+        self.unverified = 0
+        # Agentic review: code lookups, limits that stopped the agent early ("steps" /
+        # "tokens" / "time"), and the parts that failed (their diff goes to the diff review)
+        self.tool_calls = 0
+        self.limits_hit: set[str] = set()
+        self.unreviewed_diff = ""
+        self.failed_parts = 0
+        self.failed_part_numbers: list[int] = []
+        self.failure_reason: Optional[str] = None
+
+    def merge_diff_review(self, other) -> None:
+        """Add the diff review of the parts the agent did not finish; agent metadata is kept."""
+        self.extend(other)
+        self.stop_reason = getattr(other, "stop_reason", None)
+        self.dropped_by_verification += getattr(other, "dropped_by_verification", 0)
+        self.unverified += getattr(other, "unverified", 0)
 
     @property
     def complete(self) -> bool:
@@ -73,17 +117,43 @@ class AIReviewer:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._redis = redis.from_url(settings.REDIS_URL)
-        self._last_truncated = False  # the last call hit max_tokens (set by _call_claude/_call_glm)
-        self._last_cached = 0         # input tokens of the last call served from the prompt cache
 
+        # Every request is bounded: the SDK defaults (600 s, 2 silent retries) let one
+        # request outlive the task's time limit. Retries are done by call_bounded instead.
         provider = settings.AI_PROVIDER.lower()
         if provider == "glm":
-            from openai import OpenAI
+            import openai
             self._provider = "glm"
-            self._client = OpenAI(api_key=settings.ZAI_API_KEY, base_url=settings.ZAI_BASE_URL)
+            self._client = openai.OpenAI(api_key=settings.ZAI_API_KEY, base_url=settings.ZAI_BASE_URL,
+                                         timeout=openai.Timeout(settings.AI_REQUEST_TIMEOUT_SECONDS, connect=10),
+                                         max_retries=0)
+            self._warn_about_glm_sizes()
         else:
             self._provider = "claude"
-            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY,
+                                               timeout=anthropic.Timeout(settings.AI_REQUEST_TIMEOUT_SECONDS, connect=10),
+                                               max_retries=0)
+
+    def _warn_about_glm_sizes(self) -> None:
+        """Once per process: settings that make a GLM request slower than its timeout."""
+        global _warned_sizes
+        if _warned_sizes:
+            return
+        _warned_sizes = True
+        s = self._settings
+        if s.AI_MAX_TOKENS / _GLM_TOKENS_PER_SECOND > s.AI_REQUEST_TIMEOUT_SECONDS:
+            logger.warning("AI_MAX_TOKENS=%d takes ~%ds to generate on GLM, longer than AI_REQUEST_TIMEOUT_SECONDS=%d; "
+                           "long answers will time out", s.AI_MAX_TOKENS, s.AI_MAX_TOKENS // _GLM_TOKENS_PER_SECOND,
+                           s.AI_REQUEST_TIMEOUT_SECONDS)
+        if s.AI_MAX_DIFF_TOKENS > _GLM_MAX_DIFF_TOKENS_ADVICE:
+            logger.warning("AI_MAX_DIFF_TOKENS=%d is large for a reasoning model on GLM; about 15000 keeps one "
+                           "diff request within minutes", s.AI_MAX_DIFF_TOKENS)
+
+    def _record_timeout(self, kind: str) -> None:
+        try:
+            self._redis.hincrby(Metrics.AI_TIMEOUTS_KEY, kind, 1)
+        except Exception:
+            pass
 
     def _budget_key(self) -> str:
         return f"{Metrics.AI_TOKENS_TODAY_PREFIX}:{date.today().isoformat()}"
@@ -254,7 +324,7 @@ class AIReviewer:
             source="ai",
         )
 
-    def _call_claude(self, prompt: str, chunk: str) -> tuple[str, int, int]:
+    def _call_claude(self, prompt: str, chunk: str, timeout: float) -> CallResult:
         # Security-review diffs can trip a model's safety classifier; "default" fallbacks
         # re-run a declined request on a fallback model inside the same call.
         response = self._client.beta.messages.create(
@@ -264,19 +334,21 @@ class AIReviewer:
             messages=[{"role": "user", "content": chunk}],
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
+            timeout=timeout,
         )
         if response.stop_reason == "refusal":
             category = getattr(response.stop_details, "category", None) if response.stop_details else None
             raise RuntimeError(f"model declined the request (category={category})")
-        if response.stop_reason == "max_tokens":
-            self._last_truncated = True
+        truncated = response.stop_reason == "max_tokens"
+        if truncated:
             logger.warning("AI response hit max_tokens=%d — JSON is likely truncated", self._settings.AI_MAX_TOKENS)
         # Thinking blocks come before the answer — read only the text blocks
         text = "".join(block.text for block in response.content if block.type == "text")
-        input_tokens, self._last_cached = claude_input_tokens(response.usage)
-        return text, input_tokens, response.usage.output_tokens
+        input_tokens, cached = claude_input_tokens(response.usage)
+        return CallResult(text, input_tokens, _count(response.usage, "output_tokens"), cached, truncated,
+                          response.stop_reason if isinstance(response.stop_reason, str) else None)
 
-    def _call_glm(self, prompt: str, chunk: str) -> tuple[str, int, int]:
+    def _call_glm(self, prompt: str, chunk: str, timeout: float) -> CallResult:
         response = self._client.chat.completions.create(
             model=self._settings.GLM_MODEL,
             max_tokens=self._settings.AI_MAX_TOKENS,
@@ -284,28 +356,31 @@ class AIReviewer:
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": chunk},
             ],
+            timeout=timeout,
         )
-        text = response.choices[0].message.content
-        if response.choices[0].finish_reason == "length":
-            # Reasoning models can spend the whole budget thinking and return no answer at all
-            self._last_truncated = True
+        choice = response.choices[0]
+        text = choice.message.content
+        finish_reason = getattr(choice, "finish_reason", None)
         if not text:
-            finish_reason = response.choices[0].finish_reason
             logger.warning(
                 "GLM returned empty content (finish_reason=%s, model=%s)",
                 finish_reason, self._settings.GLM_MODEL,
             )
             text = ""
-        input_tokens, self._last_cached = openai_input_tokens(response.usage)
-        return text, input_tokens, response.usage.completion_tokens
+        input_tokens, cached = openai_input_tokens(response.usage)
+        # Reasoning models can spend the whole budget thinking and return no answer at all
+        return CallResult(text, input_tokens, _count(response.usage, "completion_tokens"), cached,
+                          finish_reason == "length", finish_reason, openai_reasoning_tokens(response.usage))
 
     # Circuit breaker: stop AI review after N consecutive parse failures
     _MAX_CONSECUTIVE_PARSE_FAILURES = 2
     # Cap on number of AI chunks to process (prevents runaway costs on huge PRs)
     _MAX_CHUNKS = 15
-    # Stop processing chunks this many seconds before the deadline so the task
-    # can still merge findings, post comments and finalize the build status.
-    _DEADLINE_RESERVE_SECONDS = 60
+    # Requests end this many seconds before the deadline so the task can still merge
+    # findings, post comments and finalize the build status.
+    _DEADLINE_RESERVE_SECONDS = 90
+    # A request is not sent with less time than this left — it would only time out
+    _MIN_REQUEST_SECONDS = 60
 
     def _build_request(self, chunk: str, file_contents: dict[str, Optional[str]], context: str) -> str:
         request = self._with_file_context(chunk, file_contents)
@@ -343,7 +418,12 @@ class AIReviewer:
 
     def review(self, pr_context: PRContext, config: ReviewConfig, deadline: Optional[float] = None,
                file_contents: Optional[dict[str, Optional[str]]] = None, context: str = "") -> AIReviewResult:
-        """context: the PR_CONTEXT block (intent + repo guides), sent with every request."""
+        """context: the PR_CONTEXT block (intent + repo guides), sent with every request.
+
+        Coverage first: every chunk is reviewed, then the findings are verified in the time
+        left (chunks with CRITICAL first, then BUG). Findings that could not be verified in
+        time are kept (fail open) and counted in result.unverified.
+        """
         prompt = self._load_prompt(pr_context.language, config.ai_focus)
         chunks = self._split_if_needed(pr_context.diff)
         result = AIReviewResult(chunks_total=len(chunks))
@@ -354,19 +434,41 @@ class AIReviewer:
             )
             chunks = chunks[:self._MAX_CHUNKS]
             result.stop_reason = "chunk_cap"
+        pending: list[tuple[int, str, list[Finding], float]] = []  # (chunk index, request, findings, seconds)
+        soft_limit = False
+        try:
+            self._review_chunks(prompt, chunks, result, pending, deadline, file_contents or {}, context)
+        except SoftTimeLimitExceeded:
+            # The soft limit fired inside a request: keep what is done, the task has the
+            # soft-to-hard gap left to post it
+            logger.warning("Soft time limit reached during the AI review — returning %d chunk(s) of findings",
+                           len(pending))
+            result.stop_reason = "deadline"
+            soft_limit = True
+
+        verified: dict[int, list[Finding]] = {}
+        if config.ai_verify and pending:
+            verified = self._verify_pending(pending, result, deadline, skip=soft_limit)
+        for index, _, findings, _ in pending:
+            result.extend(verified.get(index, findings))
+        return result
+
+    def _review_chunks(self, prompt: str, chunks: list[str], result: AIReviewResult, pending: list,
+                       deadline: Optional[float], file_contents: dict, context: str) -> None:
+        cap = self._settings.AI_REQUEST_TIMEOUT_SECONDS
         consecutive_parse_failures = 0
         failed_chunks = 0
         i = -1
-        while i + 1 < len(chunks):  # a while loop: a cut-off answer splits its chunk in place
+        while i + 1 < len(chunks):  # a while loop: a cut-off or too slow answer splits its chunk in place
             i += 1
             chunk = chunks[i]
-            # Wall-clock guard: stop before the task's Celery time limit kills
-            # us mid-review — partial findings still get posted and the build
-            # status gets finalized instead of being stuck on "in progress".
-            if deadline is not None and time.monotonic() > deadline - self._DEADLINE_RESERVE_SECONDS:
+            # Wall-clock guard: a chunk is sent only if its request can finish before the
+            # deadline — partial findings still get posted and the build status gets
+            # finalized instead of being stuck on "in progress".
+            if timeout_for(deadline, self._DEADLINE_RESERVE_SECONDS, cap, self._MIN_REQUEST_SECONDS) is None:
                 logger.warning(
-                    "AI review deadline reached (%d/%d chunks) — returning %d partial finding(s)",
-                    i, len(chunks), len(result),
+                    "AI review deadline reached (%d/%d chunks) — returning %d chunk(s) of findings",
+                    i, len(chunks), len(pending),
                 )
                 result.stop_reason = "deadline"
                 break
@@ -386,12 +488,13 @@ class AIReviewer:
                 result.stop_reason = "parse_failures"
                 break
             try:
-                request = self._build_request(chunk, file_contents or {}, context)
-                text, input_tokens, output_tokens = self._call(prompt, request)
-                self._check_and_record_tokens(input_tokens, output_tokens, self._last_cached)
-                logger.debug("AI raw response (chunk %d/%d): %s", i + 1, len(chunks), text)
-                items = self._parse_response(text)
-                if items is None and self._last_truncated:
+                request = self._build_request(chunk, file_contents, context)
+                res = self._call(prompt, request, deadline=deadline, reserve=self._DEADLINE_RESERVE_SECONDS,
+                                 cap=cap, floor=self._MIN_REQUEST_SECONDS, kind="chunk")
+                self._check_and_record_tokens(res.input_tokens, res.output_tokens, res.cached)
+                logger.debug("AI raw response (chunk %d/%d): %s", i + 1, len(chunks), res.text)
+                items = self._parse_response(res.text)
+                if items is None and res.truncated:
                     halves = self._halve(chunk) if len(chunks) < self._MAX_CHUNKS * 2 else None
                     if halves:
                         logger.warning("AI answer cut off at max_tokens=%d — splitting this part (%d files) "
@@ -409,25 +512,82 @@ class AIReviewer:
                 consecutive_parse_failures = 0
                 result.chunks_reviewed += 1
                 chunk_findings = [f for f in (self._validate_finding(item) for item in items if isinstance(item, dict)) if f]
-                if chunk_findings and config.ai_verify:
-                    kept = self._verify_ai_findings(chunk_findings, request, deadline)
-                    result.dropped_by_verification += len(chunk_findings) - len(kept)
-                    chunk_findings = kept
-                result.extend(chunk_findings)
+                if chunk_findings:
+                    pending.append((i, request, chunk_findings, res.elapsed))
+            except RequestTimedOut as exc:
+                if exc.by_deadline:
+                    logger.warning("AI review deadline reached in chunk %d/%d — returning %d chunk(s) of findings",
+                                   i + 1, len(chunks), len(pending))
+                    result.stop_reason = "deadline"
+                    break
+                # The full per-request cap ran out: a smaller request answers faster. Not a
+                # parse failure — the model did not misbehave, the request was too big.
+                halves = self._halve(chunk) if len(chunks) < self._MAX_CHUNKS * 2 else None
+                if halves:
+                    logger.warning("AI request timed out after %ds — splitting this part (%d files) in two",
+                                   cap, len(self._split_by_file(chunk)))
+                    chunks[i + 1:i + 1] = halves
+                    result.chunks_total += 1
+                    continue
+                logger.warning("AI request timed out after %ds on a single file — single file too slow", cap)
+                failed_chunks += 1
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 logger.error("AI review chunk failed: %s", exc)
                 consecutive_parse_failures += 1
                 failed_chunks += 1
         if result.stop_reason is None and failed_chunks:
             result.stop_reason = "errors"
-        return result
 
-    def _call(self, prompt: str, request: str) -> tuple[str, int, int]:
-        self._last_truncated = False
-        self._last_cached = 0
-        if self._provider == "glm":
-            return self._call_glm(prompt, request)
-        return self._call_claude(prompt, request)
+    def _verify_pending(self, pending: list, result: AIReviewResult, deadline: Optional[float],
+                        skip: bool = False) -> dict[int, list[Finding]]:
+        """Verify the chunks' findings, CRITICAL chunks first, then BUG; the rest stays unverified."""
+        def priority(item):
+            index, _, findings, _ = item
+            severities = {f.severity for f in findings}
+            return (Severity.CRITICAL not in severities, Severity.BUG not in severities, index)
+
+        verified: dict[int, list[Finding]] = {}
+        stopped = skip
+        for index, request, findings, elapsed in sorted(pending, key=priority):
+            if stopped:
+                self._record_ai_verification("fail_open")
+                result.unverified += len(findings)
+                continue
+            try:
+                kept, no_time = self._verify_ai_findings(findings, request, deadline, est=elapsed)
+            except SoftTimeLimitExceeded:
+                logger.warning("Soft time limit reached during verification — keeping the rest unverified")
+                self._record_ai_verification("fail_open")
+                result.unverified += len(findings)
+                stopped = True
+                continue
+            if no_time:
+                result.unverified += len(findings)
+            result.dropped_by_verification += len(findings) - len(kept)
+            verified[index] = kept
+        return verified
+
+    def _call(self, prompt: str, request: str, *, deadline: Optional[float] = None, reserve: float = 0,
+              cap: Optional[float] = None, floor: float = 0, kind: str = "chunk") -> CallResult:
+        """One bounded request; raises RequestTimedOut when it cannot finish in time."""
+        cap = cap or self._settings.AI_REQUEST_TIMEOUT_SECONDS
+        send = self._call_glm if self._provider == "glm" else self._call_claude
+        used = {"timeout": 0.0}
+
+        def attempt(timeout: float) -> CallResult:
+            used["timeout"] = timeout
+            return send(prompt, request, timeout)
+
+        started = time.monotonic()
+        res = call_bounded(attempt, deadline=deadline, reserve=reserve, cap=cap, floor=floor, kind=kind,
+                           on_timeout=self._record_timeout)
+        res.elapsed = time.monotonic() - started
+        logger.info("AI call: kind=%s chars=%d timeout=%.0f elapsed=%.1f in=%d cached=%d out=%d reasoning=%d finish=%s",
+                    kind, len(prompt) + len(request), used["timeout"], res.elapsed, res.input_tokens, res.cached,
+                    res.output_tokens, res.reasoning_tokens, res.finish_reason)
+        return res
 
     @staticmethod
     def _confirmed_indexes(items: Optional[list], count: int) -> Optional[set[int]]:
@@ -448,22 +608,27 @@ class AIReviewer:
                 confirmed.add(idx)
         return confirmed if judged else None
 
-    def _verify_ai_findings(self, findings: list[Finding], request: str, deadline: Optional[float]) -> list[Finding]:
+    def _verify_ai_findings(self, findings: list[Finding], request: str, deadline: Optional[float],
+                            est: float = 0.0) -> tuple[list[Finding], bool]:
         """Second pass over the same material that tries to refute each finding.
 
-        Fails open (keeps the findings) when there is no time or budget left, or the
-        call or its response fails — verification must never hide a finding by accident.
+        Returns (kept findings, skipped for lack of time). Fails open (keeps the findings)
+        when there is no time or budget left, or the call or its response fails —
+        verification must never hide a finding by accident. est: how long the review of
+        this chunk took; the verification is sent only if about that much time is left.
         """
-        if deadline is not None and time.monotonic() > deadline - self._DEADLINE_RESERVE_SECONDS:
+        cap = self._settings.AI_REQUEST_TIMEOUT_SECONDS
+        floor = max(self._MIN_REQUEST_SECONDS, est)
+        if timeout_for(deadline, self._DEADLINE_RESERVE_SECONDS, cap, floor) is None:
             logger.warning("No time left to verify %d AI finding(s), keeping them unverified", len(findings))
             self._record_ai_verification("fail_open")
-            return findings
+            return findings, True
         if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
             used = int(self._redis.get(self._budget_key()) or 0)
             if used >= self._settings.AI_DAILY_TOKEN_BUDGET:
                 logger.warning("Daily AI token budget reached, keeping %d AI finding(s) unverified", len(findings))
                 self._record_ai_verification("fail_open")
-                return findings
+                return findings, False
 
         payload = [
             {"index": i, "severity": f.severity.value, "file": f.file, "line": f.line,
@@ -472,31 +637,48 @@ class AIReviewer:
         ]
         verify_request = f"{request}\n\n---\nREVIEW_FINDINGS_JSON:\n{json.dumps(payload)}"
         try:
-            text, input_tokens, output_tokens = self._call(self._load_verify_prompt("verify_ai.md"), verify_request)
-            self._check_and_record_tokens(input_tokens, output_tokens, self._last_cached)
-            confirmed = self._confirmed_indexes(self._parse_response(text), len(findings))
+            res = self._call(self._load_verify_prompt("verify_ai.md"), verify_request, deadline=deadline,
+                             reserve=self._DEADLINE_RESERVE_SECONDS, cap=cap, floor=floor, kind="verify")
+            self._check_and_record_tokens(res.input_tokens, res.output_tokens, res.cached)
+            confirmed = self._confirmed_indexes(self._parse_response(res.text), len(findings))
+        except RequestTimedOut:
+            logger.warning("AI finding verification timed out, keeping %d finding(s) unverified", len(findings))
+            self._record_ai_verification("fail_open")
+            return findings, True
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             logger.error("AI finding verification failed, keeping findings unverified: %s", exc)
             confirmed = None
         if confirmed is None:
             logger.warning("AI finding verification gave no usable verdicts, keeping %d finding(s)", len(findings))
             self._record_ai_verification("fail_open")
-            return findings
+            return findings, False
 
         kept = [f for i, f in enumerate(findings) if i in confirmed]
         self._record_ai_verification("kept", len(kept))
         self._record_ai_verification("dropped", len(findings) - len(kept))
         logger.info("AI finding verification kept %d/%d finding(s)", len(kept), len(findings))
-        return kept
+        return kept, False
 
-    def verify_semgrep_findings(self, findings: list[Finding], pr_context: PRContext) -> list[Finding]:
+    # Semgrep verification: at most this long, and only with this much time left
+    _SEMGREP_VERIFY_TIMEOUT_SECONDS = 120
+    _SEMGREP_VERIFY_MIN_SECONDS = 30
+
+    def verify_semgrep_findings(self, findings: list[Finding], pr_context: PRContext,
+                                deadline: Optional[float] = None) -> list[Finding]:
         """Re-check Semgrep findings with AI and drop ones it judges to be false positives.
 
-        Fails open (returns findings unfiltered) on budget exhaustion, AI errors, or an
-        unparseable response — a verification hiccup should never silently suppress a real
-        static-analysis finding.
+        Fails open (returns findings unfiltered) on budget exhaustion, AI errors, a
+        timeout, no time left, or an unparseable response — a verification hiccup should
+        never silently suppress a real static-analysis finding.
         """
         if not findings:
+            return findings
+
+        if timeout_for(deadline, 0, self._SEMGREP_VERIFY_TIMEOUT_SECONDS, self._SEMGREP_VERIFY_MIN_SECONDS) is None:
+            logger.warning("No time left for semgrep verification (failing open)")
+            self._record_verify_fail_open()
             return findings
 
         if self._settings.AI_DAILY_TOKEN_BUDGET > 0:
@@ -520,10 +702,13 @@ class AIReviewer:
         prompt = self._load_verify_prompt()
 
         try:
-            text, input_tokens, output_tokens = self._call(prompt, chunk)
-            self._check_and_record_tokens(input_tokens, output_tokens, self._last_cached)
-            items = self._parse_response(text)
-        except Exception as exc:
+            res = self._call(prompt, chunk, deadline=deadline, reserve=0, cap=self._SEMGREP_VERIFY_TIMEOUT_SECONDS,
+                             floor=self._SEMGREP_VERIFY_MIN_SECONDS, kind="semgrep_verify")
+            self._check_and_record_tokens(res.input_tokens, res.output_tokens, res.cached)
+            items = self._parse_response(res.text)
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception as exc:  # RequestTimedOut included
             logger.error("Semgrep AI verification call failed, keeping findings unverified: %s", exc)
             self._record_verify_fail_open()
             return findings

@@ -675,3 +675,427 @@ def test_glm_cached_prompt_tokens_are_split_out():
     with patch.object(agent._client.chat.completions, "create", return_value=final):
         agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
     agent._redis.incrby.assert_called_once_with(agent._budget_key(), 4000 + 100 + 3600)
+
+
+# --- bounded time: parts in parallel, kept on failure, sized for GLM (PR #52) ---
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from celery.exceptions import SoftTimeLimitExceeded  # noqa: E402
+
+from app.analyzers import agent_reviewer as agent_mod  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_glm_thinking_state():
+    agent_mod._glm_answer_thinking_off_ok = None
+    yield
+    agent_mod._glm_answer_thinking_off_ok = None
+
+
+class APITimeoutError(Exception):
+    """Named like the SDKs' timeout error: classify_error goes by the class name."""
+
+
+class APIConnectionError(Exception):
+    pass
+
+
+class BadRequestError(Exception):
+    status_code = 400
+
+
+def _file_diff(name: str, lines: int = 40) -> str:
+    return (f"diff --git a/src/{name}.java b/src/{name}.java\n--- a/src/{name}.java\n+++ b/src/{name}.java\n"
+            f"@@ -1,1 +1,{lines + 1} @@\n class {name} {{\n" + "".join(f"+  int v{j};\n" for j in range(lines)))
+
+
+TWO_PARTS = _file_diff("A") + _file_diff("B")
+
+
+def _finding_on(name: str, line: int = 2, severity: str = "BUG") -> str:
+    return json.dumps([{"severity": severity, "file": f"src/{name}.java", "line": line, "message": "m",
+                        "suggestion": "s"}])
+
+
+def _two_part_agent(**kw):
+    # Each file fits a part on its own, both together do not
+    agent = _agent(_settings(AGENT_MAX_DIFF_TOKENS=200, **kw))
+    assert len(agent._pack(TWO_PARTS, 800)) == 2
+    return agent
+
+
+def _part_of(kwargs) -> str:
+    first = _sent_text(kwargs["messages"][0])
+    return "B" if "(part 2 of 2)" in first else "A"
+
+
+def test_failed_part_keeps_finished_parts_findings():
+    agent = _two_part_agent()
+
+    def create(**kw):
+        if _part_of(kw) == "B":
+            raise RuntimeError("api down")
+        return _claude(_text(_finding_on("A")))
+
+    with patch.object(agent._client.beta.messages, "create", side_effect=create):
+        result = agent.review_agentic(_ctx(diff=TWO_PARTS), ReviewConfig(), MagicMock(calls=0))
+    assert [f.file for f in result] == ["src/A.java"]
+    assert result.chunks_reviewed == 1 and result.failed_parts == 1 and result.failed_part_numbers == [2]
+    assert "src/B.java" in result.unreviewed_diff and "src/A.java" not in result.unreviewed_diff
+    assert result.failure_reason == "AI request failed: RuntimeError"
+
+
+def test_all_parts_failed_raises_for_fallback():
+    agent = _two_part_agent()
+    with patch.object(agent._client.beta.messages, "create", side_effect=RuntimeError("api down")):
+        with pytest.raises(AgentReviewFailed, match="AI request failed"):
+            agent.review_agentic(_ctx(diff=TWO_PARTS), ReviewConfig(), MagicMock(calls=0))
+
+
+def test_parts_run_concurrently_with_the_same_deadline():
+    agent = _two_part_agent()
+    barrier = threading.Barrier(2, timeout=5)
+    timeouts = []
+
+    def create(**kw):
+        barrier.wait()  # breaks (and the part fails) unless both parts are in flight at once
+        timeouts.append(kw["timeout"])
+        return _claude(_text(_finding_on(_part_of(kw))))
+
+    deadline = time.monotonic() + 1000
+    with patch.object(agent._client.beta.messages, "create", side_effect=create):
+        result = agent.review_agentic(_ctx(diff=TWO_PARTS), ReviewConfig(), MagicMock(calls=0), deadline=deadline)
+    assert result.chunks_reviewed == 2 and not result.unreviewed_diff
+    assert [f.file for f in result] == ["src/A.java", "src/B.java"]  # submission order, not finish order
+    assert len(timeouts) == 2 and all(t <= deadline - time.monotonic() for t in timeouts)
+
+
+def test_queued_part_gets_share_of_remaining_time():
+    agent = _two_part_agent(AGENT_PARALLEL_PARTS=1, AGENT_STEP_TIMEOUT_SECONDS=1000)
+    timeouts = {}
+
+    def create(**kw):
+        timeouts[_part_of(kw)] = kw["timeout"]
+        return _claude(_text("[]"))
+
+    with patch.object(agent._client.beta.messages, "create", side_effect=create):
+        agent.review_agentic(_ctx(diff=TWO_PARTS), ReviewConfig(), MagicMock(calls=0),
+                             deadline=time.monotonic() + 1000)
+    assert 400 < timeouts["A"] <= 410   # half of the window, minus the 90 s answer reserve
+    assert timeouts["B"] > 800          # the last part gets all that is left
+
+
+def test_part_without_viable_window_goes_to_unreviewed_without_calls():
+    agent = _two_part_agent(AGENT_PARALLEL_PARTS=1)
+    clock = {"now": 1000.0}
+
+    def create(**kw):
+        clock["now"] += 300  # part 1 eats into part 2's share
+        return _claude(_text("[]"))
+
+    with patch.object(agent._client.beta.messages, "create", side_effect=create) as mock_create, \
+         patch("app.analyzers.agent_reviewer.time.monotonic", side_effect=lambda: clock["now"]):
+        result = agent.review_agentic(_ctx(diff=TWO_PARTS), ReviewConfig(), MagicMock(calls=0), deadline=1500.0)
+    assert mock_create.call_count == 1
+    assert result.chunks_reviewed == 1 and result.failure_reason == "no time left for this part"
+    assert "src/B.java" in result.unreviewed_diff
+
+
+def test_no_viable_window_at_start_raises_not_enough_time():
+    agent = _agent()
+    with patch.object(agent._client.beta.messages, "create") as mock_create:
+        with pytest.raises(AgentReviewFailed, match="not enough time left"):
+            agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0), deadline=time.monotonic() + 100)
+    mock_create.assert_not_called()
+
+
+def _sized_file(name: str, size: int) -> str:
+    head = f"diff --git a/{name} b/{name}\n"
+    return head + "+" + "x" * (size - len(head) - 2) + "\n"
+
+
+def test_pack_balances_parts():
+    files = [_sized_file(f"F{i}.java", 30_000) for i in range(4)]
+    parts = _agent()._pack("".join(files), 100_000)
+    assert [len(p) for p in parts] == [60_000, 60_000]  # greedy would give 90k + 30k
+
+
+def test_pack_falls_back_to_greedy_when_balanced_makes_more_parts():
+    diff = _sized_file("A.java", 60_000) + _sized_file("B.java", 10_000) + _sized_file("C.java", 55_000)
+    parts = _agent()._pack(diff, 70_000)
+    assert [len(p) for p in parts] == [70_000, 55_000]
+
+
+def test_final_reserve_by_provider_and_thinking_state():
+    glm = _settings(AI_PROVIDER="glm", ZAI_API_KEY="z")
+    assert agent_mod._final_reserve(_settings(), "claude") == 90
+    assert agent_mod._final_reserve(glm, "glm") == 120
+    assert agent_mod._final_reserve(_settings(AI_PROVIDER="glm", GLM_ANSWER_THINKING="enabled"), "glm") == 270
+    agent_mod._glm_answer_thinking_off_ok = False  # Z.AI rejected or ignored thinking-off
+    assert agent_mod._final_reserve(glm, "glm") == 270
+    assert agent_mod._final_reserve(_settings(AGENT_FINAL_ANSWER_RESERVE_SECONDS=45), "glm") == 45
+
+
+def test_tool_turn_timeout_goes_to_final_answer():
+    agent = _agent()
+    with patch.object(agent._client.beta.messages, "create",
+                      side_effect=[APITimeoutError("read timeout"), _claude(_text(FINDING))]) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+    assert len(result) == 1 and result.limits_hit == {"time"}
+    answer = create.call_args_list[1].kwargs
+    assert "tool budget for this review is used up" in _sent_text(answer["messages"][-1])
+    assert answer["tool_choice"] == {"type": "none"}
+
+
+def test_tool_turn_below_floor_is_not_sent():
+    """A turn as slow as the slowest one so far would not fit before the answer reserve: answer instead."""
+    agent = _agent()
+    clock = {"now": 1000.0}
+    responses = iter([_claude(_tool_use("a", "grep", {"pattern": "x"})), _claude(_text(FINDING))])
+
+    def create(**kw):
+        clock["now"] += 200
+        return next(responses)
+
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    with patch.object(agent._client.beta.messages, "create", side_effect=create) as mock_create, \
+         patch("app.analyzers.agent_reviewer.time.monotonic", side_effect=lambda: clock["now"]):
+        result = agent.review_agentic(_ctx(), ReviewConfig(), tools, deadline=1400.0)
+    # 110 s were left for tools (1400 - 90 - 1200), less than the 200 s the first turn took
+    assert mock_create.call_count == 2 and len(result) == 1 and result.limits_hit == {"time"}
+    assert mock_create.call_args_list[1].kwargs["tool_choice"] == {"type": "none"}
+
+
+def test_final_answer_timeout_fails_only_that_part():
+    agent = _two_part_agent()
+
+    def create(**kw):
+        if _part_of(kw) == "A":
+            return _claude(_text(_finding_on("A")))
+        if kw.get("tool_choice"):
+            raise APITimeoutError("read timeout")
+        return _claude(_tool_use("b", "grep", {"pattern": "x"}))
+
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    with patch.object(agent._client.beta.messages, "create", side_effect=create):
+        result = agent.review_agentic(_ctx(diff=TWO_PARTS), ReviewConfig(agent_max_steps=1), tools)
+    assert [f.file for f in result] == ["src/A.java"]
+    assert result.failure_reason == "agent's final answer did not arrive in time"
+
+
+def _glm_turn(content=None, tool_calls=None, reasoning=0, finish="stop"):
+    usage = SimpleNamespace(prompt_tokens=50, completion_tokens=5,
+                            completion_tokens_details=SimpleNamespace(reasoning_tokens=reasoning))
+    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)], usage=usage)
+
+
+def _glm_tool_call():
+    return [SimpleNamespace(id="c1", function=SimpleNamespace(name="grep", arguments='{"pattern": "x"}'))]
+
+
+def _glm_agent():
+    return _agent(_settings(AI_PROVIDER="glm", ZAI_API_KEY="z"))
+
+
+def test_glm_answer_disables_thinking_only_on_forced_calls():
+    agent = _glm_agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    with patch.object(agent._client.chat.completions, "create",
+                      side_effect=[_glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING)]) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    assert len(result) == 1
+    assert "extra_body" not in create.call_args_list[0].kwargs  # tool turns think as before
+    assert create.call_args_list[1].kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert agent_mod._glm_answer_thinking_off_ok is True
+
+
+@patch("app.analyzers.agent_reviewer.send_alert")
+def test_glm_thinking_param_400_retries_without_and_remembers(send):
+    agent = _glm_agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    responses = [_glm_turn(tool_calls=_glm_tool_call()), BadRequestError("unknown field thinking"), _glm_turn(FINDING)]
+    with patch.object(agent._client.chat.completions, "create", side_effect=responses) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    assert len(result) == 1 and create.call_count == 3
+    assert "extra_body" not in create.call_args_list[2].kwargs
+    assert agent_mod._glm_answer_thinking_off_ok is False and agent._final_reserve() == 270
+    assert send.call_args.args[1].startswith("glm_thinking_toggle_unsupported:")
+
+
+@patch("app.analyzers.agent_reviewer.send_alert")
+def test_glm_reasoning_with_thinking_off_switches_reserve(send):
+    agent = _glm_agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    responses = [_glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING, reasoning=5000)]
+    with patch.object(agent._client.chat.completions, "create", side_effect=responses):
+        agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    assert agent_mod._glm_answer_thinking_off_ok is False and agent._final_reserve() == 270
+    send.assert_called_once()
+
+
+def test_stray_tool_calls_in_forced_mode_get_error_and_one_more_turn():
+    agent = _agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    responses = [_claude(_tool_use("a", "grep", {"pattern": "x"})),
+                 _claude(_tool_use("b", "grep", {"pattern": "y"})),   # asked to answer, looks up instead
+                 _claude(_text(FINDING))]
+    with patch.object(agent._client.beta.messages, "create", side_effect=responses) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    assert len(result) == 1 and tools.run.call_count == 1
+    refused = create.call_args_list[2].kwargs["messages"][-1]["content"][0]
+    assert refused["tool_use_id"] == "b" and refused["content"] == "ERROR: no more lookups, answer now"
+
+
+def test_excess_lookups_in_one_turn_are_refused():
+    agent = _agent()
+    tools = MagicMock(calls=2)
+    tools.run.return_value = "ok"
+    three = _claude(*[_tool_use(f"t{k}", "grep", {"pattern": str(k)}) for k in range(3)])
+    with patch.object(agent._client.beta.messages, "create", side_effect=[three, _claude(_text("[]"))]) as create:
+        result = agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=2), tools)
+    assert tools.run.call_count == 2 and result.tool_calls == 2
+    results = create.call_args_list[1].kwargs["messages"][-2]["content"]
+    assert results[2]["content"] == "ERROR: lookup budget used, answer now"
+
+
+def test_length_with_empty_answer_reported_as_cut_off():
+    agent = _agent()
+    cut = _claude(stop="max_tokens")
+    with patch.object(agent._client.beta.messages, "create", side_effect=[cut, cut]) as create:
+        with pytest.raises(AgentReviewFailed, match=r"cut off \(AGENT_MAX_TOKENS\)"):
+            agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+    assert "cut off" in _sent_text(create.call_args_list[1].kwargs["messages"][-1])
+
+
+def test_shared_token_budget_across_parts():
+    agent = _two_part_agent(AGENT_PARALLEL_PARTS=1, AGENT_MAX_TOKENS_PER_REVIEW=150)  # each turn costs 110
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    first_messages = {}
+
+    def create(**kw):
+        part = _part_of(kw)
+        first_messages.setdefault(part, _sent_text(kw["messages"][-1]))
+        if part == "A" and not kw.get("tool_choice"):
+            return _claude(_tool_use("a", "grep", {"pattern": "x"}))
+        return _claude(_text("[]"))
+
+    with patch.object(agent._client.beta.messages, "create", side_effect=create):
+        result = agent.review_agentic(_ctx(diff=TWO_PARTS), ReviewConfig(), tools)
+    assert result.chunks_reviewed == 2 and result.limits_hit == {"tokens"}
+    # Part 1 spent the review's allowance: part 2 is asked for its answer right away
+    assert "tool budget for this review is used up" in first_messages["B"]
+
+
+def _raise_wrapped_soft_limit(**kw):
+    try:
+        raise SoftTimeLimitExceeded()
+    except SoftTimeLimitExceeded as exc:
+        raise APIConnectionError("Connection error.") from exc
+
+
+@pytest.mark.parametrize("side_effect", [SoftTimeLimitExceeded(), _raise_wrapped_soft_limit])
+def test_soft_time_limit_is_not_wrapped_as_agent_failure(side_effect):
+    agent = _agent()
+    with patch.object(agent._client.beta.messages, "create", side_effect=side_effect) as create:
+        with pytest.raises(SoftTimeLimitExceeded):
+            agent.review_agentic(_ctx(), ReviewConfig(), MagicMock(calls=0))
+    assert create.call_count == 1  # a connection error caused by the soft limit is not retried
+
+
+def test_tools_reraise_soft_time_limit(projects_dir):
+    def fetch(path):
+        raise SoftTimeLimitExceeded()
+
+    view = RepoView("ws/repo", projects_dir / "repo", "", lazy_paths={"src/Late.java"}, fetch=fetch)
+    with pytest.raises(SoftTimeLimitExceeded):
+        CodeTools([view]).run("read_file", {"path": "src/Late.java"})
+
+
+def test_code_tools_overlay_grep_during_lazy_fetch_is_safe(projects_dir):
+    lazy = {f"src/Lazy{i}.java" for i in range(40)}
+
+    def fetch(path):
+        time.sleep(0.001)
+        return f"class {path} {{ int rate() {{ return 1; }} }}\n"
+
+    tools = CodeTools([RepoView("ws/repo", projects_dir / "repo", "", overlay={"src/BookingService.java": PR_SERVICE},
+                                lazy_paths=lazy, fetch=fetch)])
+    errors = []
+
+    def reader():
+        for path in sorted(lazy):
+            tools.run("read_file", {"path": path})
+
+    def grepper():
+        for _ in range(40):
+            out = tools.run("grep", {"pattern": "rate\\("})
+            if out.startswith("ERROR"):
+                errors.append(out)
+
+    threads = [threading.Thread(target=reader), threading.Thread(target=grepper), threading.Thread(target=grepper)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and tools.calls == 40 + 80
+
+
+@patch("app.workers.celery_app.metrics")
+@patch("app.workers.celery_app.redis")
+@patch("app.workers.celery_app.gather_review_context", return_value="")
+@patch("app.workers.celery_app._agentic_review")
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.load_project_config")
+def test_shadow_partial_recorded_with_partial_error(mock_config, mock_get_adapter, mock_agentic, _gather, _redis,
+                                                    mock_metrics):
+    from app.workers.celery_app import process_shadow_review
+    adapter = _adapter()
+    adapter.get_diff.return_value = DIFF
+    mock_get_adapter.return_value = adapter
+    mock_config.return_value = ReviewConfig(review_mode="shadow")
+    result = _agent_result([_finding(2)], tool_calls=4)
+    result.unreviewed_diff, result.failed_parts, result.failure_reason = "diff --git a/x b/x\n", 1, "no time left for this part"
+    mock_agentic.return_value = result
+    summary = process_shadow_review.run(_payload(), [])
+    assert summary["error"] == "partial: 1 part(s): no time left for this part"
+    assert summary["tool_calls"] == 4
+    mock_metrics.record_agentic.assert_called_once_with("shadow_partial")
+
+
+@patch("app.analyzers.agent_reviewer.send_alert")
+def test_glm_answer_timeout_with_unconfirmed_thinking_off_switches_reserve(send):
+    agent = _glm_agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    responses = [_glm_turn(tool_calls=_glm_tool_call()), APITimeoutError("read timeout")]
+    with patch.object(agent._client.chat.completions, "create", side_effect=responses):
+        with pytest.raises(agent_mod.AgentReviewFailed):
+            agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    # A reply that never arrives cannot report its reasoning tokens: the timeout itself flips it
+    assert agent_mod._glm_answer_thinking_off_ok is False and agent._final_reserve() == 270
+    send.assert_called_once()
+
+
+@patch("app.analyzers.agent_reviewer.send_alert")
+def test_glm_400_also_without_thinking_param_keeps_thinking_state(send):
+    agent = _glm_agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    responses = [_glm_turn(tool_calls=_glm_tool_call()), BadRequestError("sensitive content"),
+                 BadRequestError("sensitive content")]
+    with patch.object(agent._client.chat.completions, "create", side_effect=responses):
+        with pytest.raises(agent_mod.AgentReviewFailed):
+            agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    # The 400 was not about the switch: thinking-off stays on, no alert
+    assert agent_mod._glm_answer_thinking_off_ok is None and agent._final_reserve() == 120
+    send.assert_not_called()

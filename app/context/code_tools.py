@@ -5,15 +5,22 @@ repository the files changed in the PR are laid over the snapshot at their PR ve
 (and files the PR deletes or renames away are hidden), so the agent sees the code as it
 is with this PR applied — without anyone checking out the PR branch.
 
-Tool errors come back as text for the model — they never raise.
+Tool errors come back as text for the model — they never raise (except the Celery soft
+limit, which must reach the worker).
+
+Parts of one agentic review run in parallel threads over the same CodeTools, so the
+counter and the lazily filled overlay are guarded by a lock.
 """
 import fnmatch
 import logging
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from celery.exceptions import SoftTimeLimitExceeded
 
 from app.context.snapshots import git
 
@@ -103,6 +110,7 @@ class CodeTools:
         self._max_chars = max_result_chars
         self._file_lists: dict[str, list[str]] = {}
         self.calls = 0
+        self._lock = threading.Lock()
 
     def describe(self) -> str:
         lines = [f"- {r.name}: {r.description}" for r in self._repos.values()]
@@ -112,7 +120,8 @@ class CodeTools:
 
     def run(self, name: str, args: Any) -> str:
         """Execute one tool call; the result is always text for the model."""
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         if not isinstance(args, dict):
             return "ERROR: arguments must be a JSON object"
         handler = {
@@ -129,6 +138,8 @@ class CodeTools:
             result = f"ERROR: {exc}"
         except subprocess.TimeoutExpired:
             result = "ERROR: search took too long — narrow it down"
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:  # a tool must never break the agent loop
             logger.warning("Tool %s failed: %s", name, exc)
             result = f"ERROR: {type(exc).__name__}"
@@ -185,7 +196,7 @@ class CodeTools:
         except re.error:
             return []  # git accepted the ERE, Python can't: the PR's versions just aren't searched
         out = []
-        for path, content in repo.overlay.items():
+        for path, content in list(repo.overlay.items()):  # another part may be adding a lazy fetch
             if content is None or (glob and not _glob_match(path, glob)):
                 continue
             for n, line in enumerate(content.splitlines(), 1):
@@ -232,7 +243,7 @@ class CodeTools:
             if proc.returncode != 0:
                 raise _ToolError(proc.stderr.strip()[:300] or "cannot list files")
             files = set(proc.stdout.splitlines())
-            for path, content in repo.overlay.items():
+            for path, content in list(repo.overlay.items()):
                 (files.discard if content is None else files.add)(path)
             files |= repo.lazy_paths
             self._file_lists[repo.name] = sorted(files)
@@ -242,8 +253,9 @@ class CodeTools:
         if path in repo.overlay:
             return repo.overlay[path]
         if path in repo.lazy_paths and repo.fetch is not None:
-            content = repo.fetch(path)
-            repo.overlay[path] = content
+            content = repo.fetch(path)  # outside the lock: an HTTP call must not block the other parts
+            with self._lock:
+                repo.overlay[path] = content
             return content
         root = repo.root.resolve()
         target = (root / path).resolve()

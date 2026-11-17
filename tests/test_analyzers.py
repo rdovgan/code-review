@@ -761,3 +761,36 @@ def test_glm_call_reports_reasoning_tokens_and_finish_reason():
     with patch.object(reviewer._client.chat.completions, "create", return_value=response):
         res = reviewer._call("system", "diff", kind="chunk")
     assert res.reasoning_tokens == 900 and res.finish_reason == "stop" and not res.truncated
+
+
+
+# --- tolerant answers (GLM with thinking off drifts from the schema) ---
+
+def _tolerant_reviewer():
+    from app.analyzers.ai_reviewer import AIReviewer
+    from app.config.settings import Settings
+    return AIReviewer(Settings(ANTHROPIC_API_KEY="k", REDIS_URL="redis://localhost:6379/0"))
+
+
+def test_findings_with_drifted_keys_and_values_are_kept():
+    items = [
+        {"severity": "bug", "path": "b/src/A.java", "line": "12-14", "description": "NPE", "fix": "guard"},
+        {"severity": "High", "file": "src/B.java", "line": 3, "message": "m"},
+        {"severity": "nonsense", "file": "src/C.java", "line": 1, "message": "m"},
+    ]
+    found = _tolerant_reviewer()._validate_findings(items)
+    assert [(f.severity.value, f.file, f.line, f.suggestion) for f in found] == [
+        ("BUG", "src/A.java", 12, "guard"), ("BUG", "src/B.java", 3, "")]
+
+
+def test_array_is_taken_from_prose_with_other_brackets():
+    text = ('I checked List<String>[] usages [see BookingService] and found:\n'
+            '[{"severity": "BUG", "file": "src/A.java", "line": 2, "message": "m", "suggestion": "s"}]\nDone [ok].')
+    assert _tolerant_reviewer()._parse_response(text)[0]["file"] == "src/A.java"
+
+
+def test_glm_diff_review_turns_thinking_off_by_default():
+    from app.analyzers.ai_reviewer import glm_thinking_kwargs
+    from app.config.settings import Settings
+    assert glm_thinking_kwargs(Settings(ANTHROPIC_API_KEY="k")) == {"extra_body": {"thinking": {"type": "disabled"}}}
+    assert glm_thinking_kwargs(Settings(ANTHROPIC_API_KEY="k", GLM_THINKING="enabled")) == {}

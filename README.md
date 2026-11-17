@@ -214,6 +214,7 @@ Time: a diff bigger than `AGENT_MAX_DIFF_TOKENS` is split into parts that run in
 | `AGENT_MIN_TOOL_WINDOW_SECONDS` | `120` | A part starts only with the reserve plus this much time left; otherwise its files get the diff review |
 | `AGENT_MAX_TOKENS` | `0` | `max_tokens` of agent requests; `0` = `AI_MAX_TOKENS` |
 | `GLM_ANSWER_THINKING` | `auto` | GLM thinking for the final answer and the JSON re-ask only (tool turns keep thinking): `auto` turns it off (if Z.AI rejects the parameter: one alert, then thinking on with a 270 s reserve), `disabled`, `enabled`. The GLM answer reserve starts at 120 s and grows to cover the slowest answer seen (×1.3 + 15 s, at most 270 s; a timed-out answer → 270 s and one alert) until the worker restarts |
+| `GLM_THINKING` | `disabled` | GLM thinking for agent tool turns, the diff review and verification: `disabled` answers in seconds (agent turns went from 60–150 s to 2–5 s), `enabled` is the model default — deeper but slow enough to hit time limits |
 
 **Sizing for reasoning models on GLM** (glm-5.3-flash writes ~45 tokens/s, thinking included): keep `AI_MAX_DIFF_TOKENS` about `15000`, `AI_FILE_CONTEXT_MAX_CHARS` about `60000` and `AI_MAX_TOKENS` about `16000` — one diff request then answers within minutes. The worker logs a warning at start when the settings cannot fit `AI_REQUEST_TIMEOUT_SECONDS`. Each request logs one line (`AI call: kind=… timeout=… elapsed=… reasoning=…`), each agent turn one line (`Agent turn: part=… seconds=… cached=…`): an `elapsed` close to `timeout` means the request is too big.
 

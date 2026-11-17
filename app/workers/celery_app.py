@@ -499,8 +499,10 @@ def _run_review(self, task_payload: dict) -> dict:
     if getattr(ai_results, "unverified", 0):
         notes.append(f"> ℹ️ {ai_results.unverified} AI finding(s) were not double-checked (time limit).")
 
+    # No findings → no comment, only the build status: a summary of zeros and notes is noise.
+    # Why a review was incomplete is in the status description and the operator alerts.
     summary_comment_id = ""
-    if findings or notes:
+    if findings:
         summary = _build_summary(findings, critical_count, bug_count, perf_count, suggest_count)
         if notes:
             summary += "\n\n" + "\n\n".join(notes)
@@ -516,7 +518,7 @@ def _run_review(self, task_payload: dict) -> dict:
         # The AI review is the main check — a green status without it would be misleading
         final_state, status_description = "stopped", f"Not reviewed: {ai_incomplete_reason}"
     else:
-        final_state, status_description = "success", f"{len(findings)} issues found"
+        final_state, status_description = "success", f"{len(findings)} issues found" if findings else "No issues found"
     adapter.set_review_status(pr_context, final_state, status_description)
 
     try:

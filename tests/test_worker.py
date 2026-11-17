@@ -278,11 +278,10 @@ def test_process_review_truncates_large_diff(mock_config, mock_semgrep_cls, mock
 
     result = process_review.run(payload)
 
-    # Review continues on the truncated diff and notes the truncation in the summary
-    mock_adapter.post_summary_comment.assert_called_once()
-    call_body = mock_adapter.post_summary_comment.call_args[0][1]
-    assert "100 lines" in call_body
-    assert result["status"] in ("success", "failure")
+    # Review continues on the truncated diff; with no findings nothing is posted, only the status
+    mock_adapter.post_summary_comment.assert_not_called()
+    assert result["status"] == "success"
+    assert mock_adapter.set_review_status.call_args_list[-1].args[1:] == ("success", "No issues found")
 
 
 def test_notify_mattermost_format():
@@ -423,8 +422,7 @@ def test_ai_budget_exhausted_sets_stopped_status_not_success(*mocks):
     state, description = adapter.set_review_status.call_args_list[-1].args[1:]
     assert state == "stopped"
     assert "budget" in description
-    summary = adapter.post_summary_comment.call_args.args[1]
-    assert "AI review did not run" in summary
+    adapter.post_summary_comment.assert_not_called()  # the status says why
 
 
 @patch("app.workers.celery_app.get_adapter")
@@ -443,7 +441,9 @@ def test_ai_exception_sets_stopped_status(*mocks):
 def test_partial_ai_review_keeps_status_but_notes_it(*mocks):
     from app.analyzers.ai_reviewer import AIReviewResult
 
-    result, adapter, _ = _run_with(*mocks, AIReviewResult(chunks_total=3, chunks_reviewed=2, stop_reason="deadline"))
+    finding = Finding(severity=Severity.BUG, file="Foo.java", line=1, message="m", suggestion="s", source="ai")
+    result, adapter, _ = _run_with(*mocks, AIReviewResult([finding], chunks_total=3, chunks_reviewed=2,
+                                                          stop_reason="deadline"))
 
     assert result["status"] == "success"
     summary = adapter.post_summary_comment.call_args.args[1]
@@ -486,8 +486,7 @@ def test_truncation_note_lists_skipped_files(*mocks):
     )
     _, adapter, _ = _run_with(*mocks, [], config=ReviewConfig(static_analysis=False, max_diff_lines=10), diff=diff)
 
-    summary = adapter.post_summary_comment.call_args.args[1]
-    assert "Not reviewed: `Huge.java`" in summary
+    adapter.post_summary_comment.assert_not_called()  # no findings: status only
     # only the file that fit was sent to the AI
     sent_ctx = mocks[2].return_value.review.call_args.args[0]
     assert "Huge.java" not in sent_ctx.diff
@@ -610,7 +609,7 @@ def test_semgrep_runs_in_background_and_join_timeout_adds_note(mock_config, mock
 
     mock_ai_cls.return_value.review.assert_called_once()  # ran while Semgrep was still busy
     assert result["status"] == "success"
-    assert "Static analysis did not finish in time" in mock_adapter.post_summary_comment.call_args.args[1]
+    mock_adapter.post_summary_comment.assert_not_called()  # no findings: status only
 
 
 @patch("app.workers.celery_app.metrics")
@@ -652,3 +651,15 @@ def test_enqueued_at_is_not_passed_to_pr_context(*mocks):
     payload = {"platform": "bitbucket", "diff": ctx.diff, **asdict(ctx), "enqueued_at": time.time() - 30}
     assert process_review.run(payload)["status"] == "success"
     assert "enqueued_at" in payload  # the task payload itself is left alone (retries reuse it)
+
+
+
+@patch("app.workers.celery_app.get_adapter")
+@patch("app.workers.celery_app.AIReviewer")
+@patch("app.workers.celery_app.SemgrepRunner")
+@patch("app.workers.celery_app.load_project_config")
+def test_no_findings_posts_no_comment_only_success_status(*mocks):
+    result, adapter, _ = _run_with(*mocks, [])
+    adapter.post_summary_comment.assert_not_called()
+    adapter.post_inline_comment.assert_not_called()
+    assert adapter.set_review_status.call_args_list[-1].args[1:] == ("success", "No issues found")

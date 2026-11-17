@@ -689,9 +689,9 @@ from app.analyzers import agent_reviewer as agent_mod  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _reset_glm_thinking_state():
-    agent_mod._glm_answer_thinking_off_ok = None
+    agent_mod._glm_thinking_param_rejected, agent_mod._glm_slowest_answer = False, 0.0
     yield
-    agent_mod._glm_answer_thinking_off_ok = None
+    agent_mod._glm_thinking_param_rejected, agent_mod._glm_slowest_answer = False, 0.0
 
 
 class APITimeoutError(Exception):
@@ -833,7 +833,13 @@ def test_final_reserve_by_provider_and_thinking_state():
     assert agent_mod._final_reserve(_settings(), "claude") == 90
     assert agent_mod._final_reserve(glm, "glm") == 120
     assert agent_mod._final_reserve(_settings(AI_PROVIDER="glm", GLM_ANSWER_THINKING="enabled"), "glm") == 270
-    agent_mod._glm_answer_thinking_off_ok = False  # Z.AI rejected or ignored thinking-off
+    agent_mod._glm_slowest_answer = 100.0  # reserve covers the slowest answer seen + 30% + 15 s
+    assert agent_mod._final_reserve(glm, "glm") == 145
+    assert agent_mod._answer_floor(145) == pytest.approx(145 * 2 / 3)
+    agent_mod._glm_slowest_answer = 400.0
+    assert agent_mod._final_reserve(glm, "glm") == 270
+    agent_mod._glm_thinking_param_rejected = True  # Z.AI rejected the parameter
+    agent_mod._glm_slowest_answer = 0.0
     assert agent_mod._final_reserve(glm, "glm") == 270
     assert agent_mod._final_reserve(_settings(AGENT_FINAL_ANSWER_RESERVE_SECONDS=45), "glm") == 45
 
@@ -912,7 +918,7 @@ def test_glm_answer_disables_thinking_only_on_forced_calls():
     assert len(result) == 1
     assert "extra_body" not in create.call_args_list[0].kwargs  # tool turns think as before
     assert create.call_args_list[1].kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert agent_mod._glm_answer_thinking_off_ok is True
+    assert not agent_mod._glm_thinking_param_rejected and agent._final_reserve() == 120
 
 
 @patch("app.analyzers.agent_reviewer.send_alert")
@@ -925,20 +931,41 @@ def test_glm_thinking_param_400_retries_without_and_remembers(send):
         result = agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
     assert len(result) == 1 and create.call_count == 3
     assert "extra_body" not in create.call_args_list[2].kwargs
-    assert agent_mod._glm_answer_thinking_off_ok is False and agent._final_reserve() == 270
+    assert agent_mod._glm_thinking_param_rejected and agent._final_reserve() == 270
     assert send.call_args.args[1].startswith("glm_thinking_toggle_unsupported:")
 
 
 @patch("app.analyzers.agent_reviewer.send_alert")
-def test_glm_reasoning_with_thinking_off_switches_reserve(send):
+def test_glm_reasoning_with_thinking_off_keeps_the_switch_and_no_alert(send):
+    """Z.AI honours thinking-off yet reasons ~1k tokens on long conversations: not a failure."""
     agent = _glm_agent()
     tools = MagicMock(calls=1)
     tools.run.return_value = "ok"
-    responses = [_glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING, reasoning=5000)]
-    with patch.object(agent._client.chat.completions, "create", side_effect=responses):
+    responses = [_glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING, reasoning=1019),
+                 _glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING)]
+    with patch.object(agent._client.chat.completions, "create", side_effect=responses) as create:
         agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
-    assert agent_mod._glm_answer_thinking_off_ok is False and agent._final_reserve() == 270
-    send.assert_called_once()
+        agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    assert create.call_args_list[3].kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert agent._final_reserve() == 120
+    send.assert_not_called()
+
+
+def test_glm_slow_answer_raises_the_reserve_to_cover_it():
+    agent = _glm_agent()
+    tools = MagicMock(calls=1)
+    tools.run.return_value = "ok"
+    clock = {"now": 1000.0}
+    responses = iter([_glm_turn(tool_calls=_glm_tool_call()), _glm_turn(FINDING)])
+
+    def create(**kw):
+        clock["now"] += 100 if "extra_body" in kw else 5
+        return next(responses)
+
+    with patch.object(agent._client.chat.completions, "create", side_effect=create), \
+         patch("app.analyzers.agent_reviewer.time.monotonic", side_effect=lambda: clock["now"]):
+        agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
+    assert agent._final_reserve() == pytest.approx(100 * 1.3 + 15)
 
 
 def test_stray_tool_calls_in_forced_mode_get_error_and_one_more_turn():
@@ -1073,7 +1100,7 @@ def test_shadow_partial_recorded_with_partial_error(mock_config, mock_get_adapte
 
 
 @patch("app.analyzers.agent_reviewer.send_alert")
-def test_glm_answer_timeout_with_unconfirmed_thinking_off_switches_reserve(send):
+def test_glm_answer_timeout_raises_reserve_and_keeps_thinking_off(send):
     agent = _glm_agent()
     tools = MagicMock(calls=1)
     tools.run.return_value = "ok"
@@ -1081,9 +1108,8 @@ def test_glm_answer_timeout_with_unconfirmed_thinking_off_switches_reserve(send)
     with patch.object(agent._client.chat.completions, "create", side_effect=responses):
         with pytest.raises(agent_mod.AgentReviewFailed):
             agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
-    # A reply that never arrives cannot report its reasoning tokens: the timeout itself flips it
-    assert agent_mod._glm_answer_thinking_off_ok is False and agent._final_reserve() == 270
-    send.assert_called_once()
+    assert not agent_mod._glm_thinking_param_rejected and agent._final_reserve() == 270
+    assert send.call_args.args[1].startswith("glm_slow_final_answer:")
 
 
 @patch("app.analyzers.agent_reviewer.send_alert")
@@ -1097,5 +1123,5 @@ def test_glm_400_also_without_thinking_param_keeps_thinking_state(send):
         with pytest.raises(agent_mod.AgentReviewFailed):
             agent.review_agentic(_ctx(), ReviewConfig(agent_max_steps=1), tools)
     # The 400 was not about the switch: thinking-off stays on, no alert
-    assert agent_mod._glm_answer_thinking_off_ok is None and agent._final_reserve() == 120
+    assert not agent_mod._glm_thinking_param_rejected and agent._final_reserve() == 120
     send.assert_not_called()

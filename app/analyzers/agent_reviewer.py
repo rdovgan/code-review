@@ -50,14 +50,18 @@ _ANSWER_FLOOR_FAST = 60
 _ANSWER_FLOOR_SLOW = 180
 # Shortest timeout worth sending a tool turn with (raised to the slowest turn so far)
 _TOOL_FLOOR = 60
-# More reasoning tokens than this on a thinking-off answer: Z.AI ignored the switch
-_THINKING_OFF_MAX_REASONING = 1000
+# Reasoning on a thinking-off answer above this is logged. Z.AI honours the switch (checked
+# by hand) yet still reasons ~1k tokens on long agent conversations — a few seconds, so it
+# changes nothing; the reserve follows how long answers actually take.
+_THINKING_OFF_NOTE_REASONING = 1000
 # Extra wait for parallel parts after the deadline before they are abandoned
 _PARTS_JOIN_GRACE_SECONDS = 15
 
-# Whether Z.AI honours thinking-off for the final answer: None = not known yet, False =
-# rejected (HTTP 400) or ignored (still reasoning). Per process; a restart re-checks it.
-_glm_answer_thinking_off_ok: Optional[bool] = None
+# Per process; a restart re-checks both.
+# Z.AI answered 400 to the thinking parameter and a resend without it worked: stop sending it.
+_glm_thinking_param_rejected = False
+# Slowest thinking-off final answer seen (seconds); the GLM reserve grows to cover it.
+_glm_slowest_answer = 0.0
 
 # Sent once when the agent answers before it has looked at the code
 _INVESTIGATE_FIRST = (
@@ -134,7 +138,7 @@ class _Bounds:
 
 def _glm_thinking_off(mode: str) -> bool:
     """Whether a GLM final answer is sent with thinking off."""
-    return mode in ("disabled", "auto") and _glm_answer_thinking_off_ok is not False
+    return mode in ("disabled", "auto") and not _glm_thinking_param_rejected
 
 
 def _final_reserve(settings, provider: str) -> float:
@@ -144,22 +148,29 @@ def _final_reserve(settings, provider: str) -> float:
     if provider != "glm":
         return float(_CLAUDE_ANSWER_RESERVE)
     if _glm_thinking_off(settings.GLM_ANSWER_THINKING.lower()):
-        return float(_GLM_ANSWER_RESERVE_THINKING_OFF)
+        # Room for the slowest answer seen so far plus a margin, between the two fixed values
+        observed = _glm_slowest_answer * 1.3 + 15 if _glm_slowest_answer else 0
+        return float(min(_GLM_ANSWER_RESERVE_THINKING_ON, max(_GLM_ANSWER_RESERVE_THINKING_OFF, observed)))
     return float(_GLM_ANSWER_RESERVE_THINKING_ON)
 
 
 def _answer_floor(reserve: float) -> float:
-    return float(_ANSWER_FLOOR_FAST if reserve <= _GLM_ANSWER_RESERVE_THINKING_OFF else _ANSWER_FLOOR_SLOW)
+    """Shortest timeout worth sending the final answer with: 60 s, up to 180 s as the reserve grows."""
+    if reserve <= _GLM_ANSWER_RESERVE_THINKING_OFF:
+        return float(_ANSWER_FLOOR_FAST)
+    return float(min(_ANSWER_FLOOR_SLOW, max(_ANSWER_FLOOR_FAST, reserve * 2 / 3)))
 
 
 class _OpenAIChat:
     """OpenAI-compatible chat with function calling (GLM via Z.AI)."""
 
     def __init__(self, client, model: str, max_tokens: int, thinking_mode: str = "auto",
-                 on_thinking_unsupported: Optional[Callable[[str], None]] = None) -> None:
+                 on_thinking_unsupported: Optional[Callable[[str], None]] = None,
+                 on_slow_answer: Optional[Callable[[str], None]] = None) -> None:
         self._client, self._model, self._max_tokens = client, model, max_tokens
         self._thinking_mode = thinking_mode.lower()
         self._on_thinking_unsupported = on_thinking_unsupported
+        self._on_slow_answer = on_slow_answer
         self._tools = [{"type": "function", "function": s} for s in TOOL_SCHEMAS]
 
     def start(self, user_text: str) -> list[dict]:
@@ -180,21 +191,20 @@ class _OpenAIChat:
         return self._client.chat.completions.create(**kwargs)
 
     def call(self, system: str, messages: list[dict], bounds: _Bounds, answer: bool = False) -> _Turn:
-        global _glm_answer_thinking_off_ok
+        global _glm_thinking_param_rejected, _glm_slowest_answer
         thinking_off = answer and _glm_thinking_off(self._thinking_mode)
+        started = time.monotonic()
         try:
             response = bounds.call(lambda t: self._send(system, messages, t, thinking_off))
         except RequestTimedOut as exc:
-            # No answer at all with thinking off, before the switch was ever confirmed: Z.AI
-            # most likely ignored it and kept reasoning (a confirming reply never arrives
-            # then, so the reasoning-token check below cannot catch it). Use the long reserve.
-            if thinking_off and exc.sent and _glm_answer_thinking_off_ok is None:
-                _glm_answer_thinking_off_ok = False
-                logger.warning("GLM final answer with thinking off timed out before thinking-off was confirmed; "
-                               "the final-answer reserve is raised to %ds from now on",
-                               _GLM_ANSWER_RESERVE_THINKING_ON)
-                if self._on_thinking_unsupported is not None:
-                    self._on_thinking_unsupported(f"did not answer within {exc.timeout:.0f}s with thinking off")
+            # A final answer that did not arrive: keep sending thinking-off (Z.AI honours it),
+            # but give later answers the longest reserve
+            if thinking_off and exc.sent and _glm_slowest_answer < _GLM_ANSWER_RESERVE_THINKING_ON:
+                _glm_slowest_answer = float(_GLM_ANSWER_RESERVE_THINKING_ON)
+                logger.warning("GLM final answer did not arrive within %.0fs; the final-answer reserve is %ds "
+                               "from now on", exc.timeout, _GLM_ANSWER_RESERVE_THINKING_ON)
+                if self._on_slow_answer is not None:
+                    self._on_slow_answer(f"A final answer did not arrive within {exc.timeout:.0f}s.")
             raise
         except Exception as exc:
             if not (thinking_off and classify_error(exc) == "bad_request"):
@@ -203,7 +213,7 @@ class _OpenAIChat:
             # answers 400 for other reasons (content filter, context length), which say
             # nothing about the thinking switch.
             response = bounds.call(lambda t: self._send(system, messages, t, False))
-            _glm_answer_thinking_off_ok = False
+            _glm_thinking_param_rejected = True
             logger.warning("Z.AI rejected thinking-off for the final answer (%s); answers think from now on",
                            type(exc).__name__)
             if self._on_thinking_unsupported is not None:
@@ -214,15 +224,11 @@ class _OpenAIChat:
         message = choice.message
         reasoning = openai_reasoning_tokens(response.usage)
         if thinking_off:
-            if reasoning > _THINKING_OFF_MAX_REASONING:
-                if _glm_answer_thinking_off_ok is not False:
-                    logger.warning("GLM reasoned %d tokens with thinking off; the final-answer reserve is raised "
-                                   "to %ds from now on", reasoning, _GLM_ANSWER_RESERVE_THINKING_ON)
-                    if self._on_thinking_unsupported is not None:
-                        self._on_thinking_unsupported(f"ignored: {reasoning} reasoning tokens")
-                _glm_answer_thinking_off_ok = False
-            else:
-                _glm_answer_thinking_off_ok = True
+            elapsed = time.monotonic() - started
+            if elapsed > _glm_slowest_answer:
+                _glm_slowest_answer = elapsed
+            if reasoning > _THINKING_OFF_NOTE_REASONING:
+                logger.info("GLM final answer with thinking off: %d reasoning tokens, %.0fs", reasoning, elapsed)
         calls = []
         for tc in message.tool_calls or []:
             try:
@@ -353,7 +359,8 @@ class AgentReviewer(AIReviewer):
         max_tokens = self._settings.AGENT_MAX_TOKENS or self._settings.AI_MAX_TOKENS
         if self._provider == "glm":
             return _OpenAIChat(self._client, self._settings.GLM_MODEL, max_tokens,
-                               self._settings.GLM_ANSWER_THINKING, self._alert_thinking_unsupported)
+                               self._settings.GLM_ANSWER_THINKING, self._alert_thinking_unsupported,
+                               self._alert_slow_answer)
         return _ClaudeChat(self._client, self._settings.AI_MODEL, max_tokens)
 
     def _alert_thinking_unsupported(self, how: str) -> None:
@@ -362,6 +369,12 @@ class AgentReviewer(AIReviewer):
                    f"Z.AI {how}. Agent final answers now think and get a {_GLM_ANSWER_RESERVE_THINKING_ON}s reserve, "
                    "which leaves less time for code lookups. Set `GLM_ANSWER_THINKING=enabled` to stop retrying "
                    "after a restart.", self._redis)
+
+    def _alert_slow_answer(self, what: str) -> None:
+        send_alert(self._settings, f"glm_slow_final_answer:{today()}", "GLM final answer too slow",
+                   f"{what} Until the worker restarts, agent final answers get a {_GLM_ANSWER_RESERVE_THINKING_ON}s "
+                   "reserve, which leaves less time for code lookups. That part's files got the diff review.",
+                   self._redis)
 
     def _final_reserve(self) -> float:
         return _final_reserve(self._settings, self._provider)

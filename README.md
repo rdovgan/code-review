@@ -75,7 +75,9 @@ chmod 600 .env config/credentials.yml
 | `AI_FILE_CONTEXT_MAX_CHARS` | `120000` | Full changed files sent with the diff; `0` disables |
 | `AI_PR_CONTEXT_MAX_CHARS` | `40000` | PR description + commits + Jira ticket + repo guide; `0` disables |
 | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | empty | Optional. Ticket key is taken from the branch name or PR title. Use a read-only account or a token with the `read:jira-work` scope |
-| `MATTERMOST_WEBHOOK_URL` | empty | Optional. Message on new PRs by authors listed in `notify_authors` |
+| `MATTERMOST_WEBHOOK_URL` | empty | Optional. Message on new PRs by authors listed in `notify_authors`, plus operator alerts to the same channel: AI budget at `AI_BUDGET_ALERT_PERCENT` and used up, the agent stopped by `agent_max_steps` / token / time limits, deep review falling back, AI review incomplete |
+| `ALERT_REPEAT_HOURS` | `24` | Each alert (per repo and kind) is posted at most once per this period; `0` turns alerts off |
+| `AI_BUDGET_ALERT_PERCENT` | `80` | Share of `AI_DAILY_TOKEN_BUDGET` that triggers the early budget alert |
 | `REDIS_PASSWORD` | — | Set your own |
 
 Agentic review settings are in [Review modes](#review-modes).

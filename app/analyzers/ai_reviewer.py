@@ -12,6 +12,7 @@ import redis
 from app.config.settings import Settings
 from app.metrics import Metrics
 from app.models import Finding, PRContext, ReviewConfig, Severity
+from app.notifiers.alerts import send_alert, today
 from app.utils.diff_parser import split_diff_by_file
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,20 @@ class AIReviewer:
         """Tokens as the budget counts them: cache reads at AI_CACHED_TOKEN_WEIGHT."""
         return input_tokens + output_tokens + round(cached_tokens * self._settings.AI_CACHED_TOKEN_WEIGHT)
 
+    def _alert_budget(self, budget: int, before: int, after: int) -> None:
+        """Alert when today's usage crosses the warning share of the budget, and the budget itself."""
+        warn_at = budget * max(0, min(100, self._settings.AI_BUDGET_ALERT_PERCENT)) // 100
+        if before < budget <= after:
+            send_alert(self._settings, f"budget_exceeded:{today()}", "daily AI token budget used up",
+                       f"{after:,} of {budget:,} tokens used today. Until the counter resets at midnight "
+                       "(server time), reviews run Semgrep only and get the `stopped` status. Raise `AI_DAILY_TOKEN_BUDGET` in .env "
+                       "or move repositories from `review_mode: agentic` back to `diff`.", self._redis)
+        elif 0 < warn_at and before < warn_at <= after:
+            send_alert(self._settings, f"budget_warning:{today()}",
+                       f"{after * 100 // budget}% of the daily AI token budget used",
+                       f"{after:,} of {budget:,} tokens used today. When it runs out, reviews run Semgrep only "
+                       "until midnight (server time).", self._redis)
+
     def _check_and_record_tokens(self, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> bool:
         """Returns False if daily budget is exceeded. Always records usage.
 
@@ -106,6 +121,8 @@ class AIReviewer:
         self._redis.hincrby(Metrics.AI_TOKENS_BY_PROVIDER_KEY, f"{self._provider}:output", output_tokens)
         if cached_tokens:
             self._redis.hincrby(Metrics.AI_TOKENS_BY_PROVIDER_KEY, f"{self._provider}:cached", cached_tokens)
+        if budget > 0:
+            self._alert_budget(budget, new_count - total, new_count)
         if budget > 0 and (new_count - total) >= budget:
             logger.warning("Daily AI token budget (%d) exceeded: %d used today", budget, new_count)
             self._redis.incr(Metrics.AI_BUDGET_EXCEEDED_KEY)

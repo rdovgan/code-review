@@ -161,6 +161,53 @@ def _answer_floor(reserve: float) -> float:
     return float(min(_ANSWER_FLOOR_SLOW, max(_ANSWER_FLOOR_FAST, reserve * 2 / 3)))
 
 
+_LOG_LOOKUPS_MAX_CHARS = 3000
+_LOG_ANSWER_MAX_CHARS = 1500
+
+
+def _describe_lookup(name: str, args: Any, output: str) -> str:
+    """One lookup in a few words: grep "x" (repo) → 12 lines, read path:10-50, …"""
+    args = args if isinstance(args, dict) else {}
+    repo = f" ({args['repo']})" if args.get("repo") else ""
+    if name == "grep":
+        what = f'grep "{args.get("pattern", "")}"' + (f" in {args['path_glob']}" if args.get("path_glob") else "")
+    elif name == "read_file":
+        lines = f":{args.get('start_line', 1)}-{args['end_line']}" if args.get("end_line") else ""
+        what = f"read {args.get('path', '')}{lines}"
+    elif name == "find_files":
+        what = f"find {args.get('name_glob', '')}"
+    elif name == "list_dir":
+        what = f"ls {args.get('path') or '/'}"
+    else:
+        what = name
+    if output.startswith("ERROR"):
+        result = "error"
+    elif output in ("no matches", "no files found"):
+        result = output
+    elif name in ("grep", "find_files"):
+        result = f"{output.count(chr(10)) + 1} lines"
+    else:
+        result = "ok"
+    return f"{what}{repo} → {result}"
+
+
+def _log_answer(part: int, findings: list, lookups: list[str], text: str) -> None:
+    """What the agent checked and concluded — to judge a review with no findings."""
+    checked = "; ".join(lookups) or "nothing"
+    if len(checked) > _LOG_LOOKUPS_MAX_CHARS:
+        checked = checked[:_LOG_LOOKUPS_MAX_CHARS] + f"… ({len(lookups)} in all)"
+    logger.info("Agent lookups (part=%d): %s", part, checked)
+    if findings:
+        for f in findings:
+            logger.info("Agent finding (part=%d): %s %s:%d %s", part, f.severity.value, f.file, f.line,
+                        f.message[:200].replace("\n", " "))
+        return
+    answer = " ".join(text.split())
+    if len(answer) > _LOG_ANSWER_MAX_CHARS:
+        answer = answer[:_LOG_ANSWER_MAX_CHARS] + "…"
+    logger.info("Agent found no issues (part=%d); its answer: %s", part, answer or "(empty)")
+
+
 class _OpenAIChat:
     """OpenAI-compatible chat with function calling (GLM via Z.AI)."""
 
@@ -547,6 +594,7 @@ class AgentReviewer(AIReviewer):
         slowest_turn = 0.0
         answer_elapsed = 0.0
         asked_at = None
+        lookups: list[str] = []   # what the agent checked, logged with its answer
         min_calls = max(0, settings.AGENT_MIN_TOOL_CALLS)
         while True:
             if stop is not None and stop.is_set():
@@ -619,6 +667,7 @@ class AgentReviewer(AIReviewer):
                     steps += 1
                     output = tools.run(call.name, call.args)
                     logger.debug("Agent tool %s(%s) → %d chars", call.name, call.args, len(output))
+                    lookups.append(_describe_lookup(call.name, call.args, output))
                     results.append((call, output))
                 chat.add_results(messages, results)
                 continue
@@ -652,4 +701,6 @@ class AgentReviewer(AIReviewer):
                 continue
             waited = f", {time.monotonic() - asked_at:.0f}s after it was asked" if asked_at else ""
             logger.info("Agent answered (part=%d) after %d code lookup(s)%s", part, steps, waited)
-            return self._validate_findings(items), steps
+            findings = self._validate_findings(items)
+            _log_answer(part, findings, lookups, turn.text)
+            return findings, steps

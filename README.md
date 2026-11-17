@@ -70,12 +70,13 @@ chmod 600 .env config/credentials.yml
 | `ANTHROPIC_API_KEY`, `AI_MODEL` | —, `claude-sonnet-5-5` | Claude |
 | `ZAI_API_KEY`, `GLM_MODEL` | —, `glm-5-turbo` | GLM (Z.AI) |
 | `AI_DAILY_TOKEN_BUDGET` | `10000000` | Input+output tokens per day; `0` = unlimited. When reached, reviews get `STOPPED` |
-| `AI_MAX_DIFF_TOKENS` | `60000` | Diff per AI request; bigger diffs are split by whole files |
+| `AI_MAX_DIFF_TOKENS` | `60000` | Diff per AI request; bigger diffs are split by whole files. Reasoning models on GLM: about `15000` |
 | `AI_MAX_TOKENS` | `16000` | Max AI answer (incl. thinking) |
-| `AI_FILE_CONTEXT_MAX_CHARS` | `120000` | Full changed files sent with the diff; `0` disables |
+| `AI_FILE_CONTEXT_MAX_CHARS` | `120000` | Full changed files sent with the diff; `0` disables. Reasoning models on GLM: about `60000` |
+| `AI_REQUEST_TIMEOUT_SECONDS` | `420` | Read timeout cap for one diff, verify or final-answer request; requests near the task deadline get less, and a request that cannot finish in time is not sent. A multi-file request that times out is split in two |
 | `AI_PR_CONTEXT_MAX_CHARS` | `40000` | PR description + commits + Jira ticket + repo guide; `0` disables |
 | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | empty | Optional. Ticket key is taken from the branch name or PR title. Use a read-only account or a token with the `read:jira-work` scope |
-| `MATTERMOST_WEBHOOK_URL` | empty | Optional. Message on new PRs by authors listed in `notify_authors`, plus operator alerts to the same channel: AI budget at `AI_BUDGET_ALERT_PERCENT` and used up, the agent stopped by `agent_max_steps` / token / time limits, deep review falling back, AI review incomplete |
+| `MATTERMOST_WEBHOOK_URL` | empty | Optional. Message on new PRs by authors listed in `notify_authors`, plus operator alerts to the same channel: AI budget at `AI_BUDGET_ALERT_PERCENT` and used up, the agent stopped by `agent_max_steps` / token limits, deep review falling back fully or for some parts, GLM rejecting thinking-off, AI review incomplete. The agent's time limit is a summary note and a metric, not an alert |
 | `ALERT_REPEAT_HOURS` | `24` | Each alert (per repo and kind) is posted at most once per this period; `0` turns alerts off |
 | `AI_BUDGET_ALERT_PERCENT` | `80` | Share of `AI_DAILY_TOKEN_BUDGET` that triggers the early budget alert |
 | `REDIS_PASSWORD` | — | Set your own |
@@ -200,7 +201,20 @@ Depth: the agent must check the change against the code — an agent that answer
 
 Cost: every step re-sends the conversation. With Claude it is marked for prompt caching, so earlier steps are read from the cache; Z.AI caches repeated prefixes for GLM by itself. Cache reads count toward the daily budget at `AI_CACHED_TOKEN_WEIGHT` (0.1) and show up as `kind="cached"` in `code_review_ai_tokens_total`.
 
-Limits: `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` (800k, cache reads weighted), `AGENT_MAX_DIFF_TOKENS` (30k; diffs over 3× fall back), 600 s of extra task time — the regular time stays reserved for the fallback. Other settings: `PROJECTS_SNAPSHOT_DIR` (`/projects`), `BRANCH_SNAPSHOT_DIR` (`/repos`), `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6).
+Limits: `agent_max_steps`, `AGENT_MAX_TOKENS_PER_REVIEW` (800k for the whole review, all parts together, cache reads weighted), `AGENT_MAX_DIFF_TOKENS` (30k; diffs over 3× fall back), 600 s of extra task time — the regular time stays reserved for the fallback. Other settings: `PROJECTS_SNAPSHOT_DIR` (`/projects`), `BRANCH_SNAPSHOT_DIR` (`/repos`), `BRANCH_SNAPSHOT_MAX_AGE_HOURS` (6).
+
+Time: a diff bigger than `AGENT_MAX_DIFF_TOKENS` is split into parts that run in parallel within the agent's window. Every request has a read timeout derived from the deadline; tool turns stop early enough to leave the final answer its reserve. A part that fails (no time left, answer timed out, API error) keeps the findings of the other parts — only its files get the standard diff review, and the summary says so. Semgrep runs in the background next to the AI review.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AGENT_PARALLEL_PARTS` | `3` | Parts run at once; `1` = one after another, each with its share of the window. Lower it if Z.AI returns 429 |
+| `AGENT_STEP_TIMEOUT_SECONDS` | `180` | Read timeout cap for one tool turn; a turn that times out goes to the final answer |
+| `AGENT_FINAL_ANSWER_RESERVE_SECONDS` | `0` | Time kept for the final answer; `0` = auto: Claude 90 s, GLM 120 s with thinking off, 270 s if thinking cannot be turned off |
+| `AGENT_MIN_TOOL_WINDOW_SECONDS` | `120` | A part starts only with the reserve plus this much time left; otherwise its files get the diff review |
+| `AGENT_MAX_TOKENS` | `0` | `max_tokens` of agent requests; `0` = `AI_MAX_TOKENS` |
+| `GLM_ANSWER_THINKING` | `auto` | GLM thinking for the final answer and the JSON re-ask only (tool turns keep thinking): `auto` turns it off and detects when Z.AI rejects or ignores that (one alert, then 270 s reserve), `disabled`, `enabled` |
+
+**Sizing for reasoning models on GLM** (glm-5.3-flash writes ~45 tokens/s, thinking included): keep `AI_MAX_DIFF_TOKENS` about `15000`, `AI_FILE_CONTEXT_MAX_CHARS` about `60000` and `AI_MAX_TOKENS` about `16000` — one diff request then answers within minutes. The worker logs a warning at start when the settings cannot fit `AI_REQUEST_TIMEOUT_SECONDS`. Each request logs one line (`AI call: kind=… timeout=… elapsed=… reasoning=…`), each agent turn one line (`Agent turn: part=… seconds=… cached=…`): an `elapsed` close to `timeout` means the request is too big.
 
 ## Claude Code skills
 

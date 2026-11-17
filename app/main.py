@@ -133,7 +133,8 @@ async def _queue_review(pr_context, platform: str, adapter) -> JSONResponse:
                            pr=pr_context.pr_id, error=str(exc))
             pr_context.changed_files = []
 
-    task_payload = {"platform": platform, "diff": "", **asdict(pr_context)}
+    # enqueued_at: the worker logs the queue wait (input for the worker concurrency)
+    task_payload = {"platform": platform, "diff": "", **asdict(pr_context), "enqueued_at": time.time()}
     # Scale time limits by number of changed files (capped, falls back to 10)
     file_count = min(len(pr_context.changed_files) or 10, _MAX_FILE_COUNT_FOR_LIMITS)
     soft_limit = _BASE_SOFT_TIME_LIMIT + file_count * _EXTRA_SECONDS_PER_FILE

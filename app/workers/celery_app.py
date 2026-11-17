@@ -2,7 +2,9 @@ import json
 import logging
 import re
 import time
-from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import asdict, replace
 
 import httpx
 import redis
@@ -60,6 +62,7 @@ def _mark_review_aborted(task_payload: dict, description: str) -> None:
         payload = dict(task_payload)
         platform = payload.pop("platform")
         payload.pop("diff", None)
+        payload.pop("enqueued_at", None)
         pr_context = PRContext(platform=platform, diff="", **payload)
         workspace, repo_slug = pr_context.repo_full_name.split("/", 1)
         get_adapter(platform, workspace, repo_slug, settings).set_review_status(pr_context, "stopped", description)
@@ -99,10 +102,12 @@ def on_task_retry(sender, request, reason, einfo, **kwargs):
 
 # Base time limits — dynamically scaled per task in main._queue_review()
 _BASE_SOFT_TIME_LIMIT = 300   # 5 min base
-_BASE_TIME_LIMIT = 360        # 6 min base
+# Hard = soft + 120: when the soft limit fires inside a request, the task still has two
+# minutes to post what it has and set the build status
+_BASE_TIME_LIMIT = 420
 _EXTRA_SECONDS_PER_FILE = 15  # add 15s per file — one AI chunk takes ~30–60s
-# Cap on the file count used for limit scaling — keeps the scaled hard limit
-# below the global safety net (360 + 60*15 = 1260s < 1740s)
+# Cap on the file count used for limit scaling — keeps the scaled hard limit of a diff
+# review below the global safety net (420 + 60*15 = 1320s < 1740s)
 _MAX_FILE_COUNT_FOR_LIMITS = 60
 # review_mode: agentic gets this much extra time for the agent (incl. repo fetch); the
 # regular budget above stays reserved for the diff-review fallback
@@ -111,6 +116,10 @@ _AGENTIC_EXTRA_SECONDS = 600
 _SHADOW_SOFT_TIME_LIMIT = 900
 _SHADOW_TIME_LIMIT = 960
 _SHADOW_RECORD_TTL_SECONDS = 30 * 86400
+# Kept before the task deadline for merging, posting comments and the build status
+_FINALIZE_RESERVE = 60
+# Shortest wait for the background Semgrep after the AI review
+_STATIC_JOIN_MIN_WAIT = 5.0
 
 celery_app = Celery(
     "code_review",
@@ -270,6 +279,8 @@ def _run_review(self, task_payload: dict) -> dict:
     payload = dict(task_payload)  # copy — pop() would corrupt dict on retry
     platform = payload.pop("platform")
     diff = payload.pop("diff", "")
+    enqueued_at = payload.pop("enqueued_at", None)
+    queue_wait = f"{time.time() - enqueued_at:.0f}s" if isinstance(enqueued_at, (int, float)) else "?"
     pr_context = PRContext(platform=platform, diff=diff, **payload)
 
     workspace, repo_slug = pr_context.repo_full_name.split("/", 1)
@@ -294,7 +305,8 @@ def _run_review(self, task_payload: dict) -> dict:
 
     pr_tag = f"[PR #{pr_context.pr_id} {pr_context.repo_full_name}]"
     review_start = time.monotonic()
-    logger.info("%s Review started — %d files, language: %s", pr_tag, len(pr_context.changed_files), pr_context.language)
+    logger.info("%s Review started — %d files, language: %s, queue_wait=%s", pr_tag, len(pr_context.changed_files),
+                pr_context.language, queue_wait)
 
     # Ignored/deleted/binary files are dropped before the line limit is applied, and the
     # limit cuts at file/hunk boundaries — see prepare_diff()
@@ -325,64 +337,46 @@ def _run_review(self, task_payload: dict) -> dict:
         review_files = [fd.path for fd in split_diff_by_file(pr_context.diff)]
         file_contents = _fetch_file_contents(adapter, pr_context, review_files)
 
-    # What the change is meant to do (PR description, commits, Jira ticket) and the repo's
-    # own guide — fetched once, sent with every AI request
-    commits = _fetch_commits(adapter, pr_context)
-    review_context = ""
-    if config.ai_review:
-        try:
-            review_context = gather_review_context(adapter, pr_context, config, settings, commits)
-        except Exception as exc:
-            logger.warning("%s Failed to gather PR context, reviewing without it: %s", pr_tag, exc)
+    # Semgrep and its AI verification run in the background while the AI review runs:
+    # they used to take 2–4 minutes out of the agent's window
+    static_pool, static_future = None, None
+    if config.static_analysis:
+        static_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semgrep")
+        verify_deadline = deadline - _FINALIZE_RESERVE if deadline is not None else None
+        static_future = static_pool.submit(_static_analysis, config, pr_context, adapter, file_contents,
+                                           verify_deadline, pr_tag)
 
     semgrep_results = []
     ai_results = []
-    ai_reviewer = None
     ai_incomplete_reason = None  # set when the AI review did not cover the whole diff
     ai_reviewed_nothing = False  # ...and when it covered none of it
     review_mode_note = None      # agentic review: how it went, shown in the summary
+    extra_notes: list[str] = []
 
     try:
-        if config.static_analysis:
-            logger.info("%s Step 1/2: Static analysis started", pr_tag)
+        # What the change is meant to do (PR description, commits, Jira ticket) and the repo's
+        # own guide — fetched once, sent with every AI request
+        commits = _fetch_commits(adapter, pr_context)
+        review_context = ""
+        if config.ai_review:
             try:
-                semgrep_results = SemgrepRunner(config).run(pr_context, adapter, file_contents=file_contents)
-                logger.info("%s Step 1/2: Static analysis complete — %d finding(s)", pr_tag, len(semgrep_results))
+                review_context = gather_review_context(adapter, pr_context, config, settings, commits)
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
-                logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
-
-            if semgrep_results and config.semgrep_ai_verify:
-                logger.info("%s Step 1/2: Verifying %d semgrep finding(s) via AI", pr_tag, len(semgrep_results))
-                try:
-                    ai_reviewer = ai_reviewer or AIReviewer(settings)
-                    verified = ai_reviewer.verify_semgrep_findings(semgrep_results, pr_context)
-                    logger.info(
-                        "%s Step 1/2: Semgrep AI verification kept %d/%d finding(s)",
-                        pr_tag, len(verified), len(semgrep_results),
-                    )
-                    metrics.record_semgrep_verification(kept=len(verified), total=len(semgrep_results))
-                    semgrep_results = verified
-                except Exception as exc:
-                    logger.error("%s Step 1/2: Semgrep AI verification failed, keeping unverified results — %s", pr_tag, exc)
+                logger.warning("%s Failed to gather PR context, reviewing without it: %s", pr_tag, exc)
 
         if config.ai_review:
             # deadline = the task's soft time limit. The reviewer stops before it and
             # returns partial findings, so the build status always gets finalized
             # instead of the worker being SIGKILLed mid-review.
-            agentic_done = False
+            agent_res = None
             if config.review_mode == "agentic":
                 logger.info("%s Step 2/2: Agentic review started", pr_tag)
                 try:
-                    ai_results = _agentic_review(adapter, pr_context, config, review_context,
-                                                 _agent_deadline(deadline, _soft_time_limit(self)), file_contents,
-                                                 raw_diff)
-                    agentic_done = True
-                    metrics.record_agentic("ok")
-                    review_mode_note = (f"> 🔎 Deep review: the AI checked the change against the repository "
-                                        f"({getattr(ai_results, 'tool_calls', 0)} code lookups).")
-                    logger.info("%s Step 2/2: Agentic review complete — %d finding(s), %d code lookup(s)",
-                                pr_tag, len(ai_results), getattr(ai_results, "tool_calls", 0))
-                    _alert_agent_limits(pr_context, config, ai_results)
+                    agent_res = _agentic_review(adapter, pr_context, config, review_context,
+                                                _agent_deadline(deadline, _soft_time_limit(self)), file_contents,
+                                                raw_diff)
                 except SoftTimeLimitExceeded:
                     raise
                 except Exception as exc:
@@ -393,20 +387,57 @@ def _run_review(self, task_payload: dict) -> dict:
                     _alert(pr_context, f"agent_failed:{re.sub(r'[0-9]+', 'N', reason)}",
                            "deep review fell back to the diff review",
                            f"Reason: {reason}. The PR was reviewed the standard way.")
-                    ai_results = []
 
-            if not agentic_done:
+            if agent_res is not None:
+                lookups = getattr(agent_res, "tool_calls", 0)
+                logger.info("%s Step 2/2: Agentic review complete — %d finding(s), %d code lookup(s)",
+                            pr_tag, len(agent_res), lookups)
+                if getattr(agent_res, "unreviewed_diff", ""):
+                    # Some parts failed: the finished parts' findings stay, the rest of the
+                    # files get the standard review — not the whole diff again
+                    reason = agent_res.failure_reason or "error"
+                    logger.warning("%s Step 2/2: %d of %d agent part(s) failed (%s) — diff review of their files",
+                                   pr_tag, agent_res.failed_parts, agent_res.chunks_total, reason)
+                    sub = replace(pr_context, diff=agent_res.unreviewed_diff)
+                    diff_res, incomplete, _ = _diff_ai_review(None, sub, config, deadline, file_contents,
+                                                              review_context, pr_tag)
+                    agent_res.merge_diff_review(diff_res)
+                    if incomplete:
+                        ai_incomplete_reason = incomplete
+                    metrics.record_agentic("partial")
+                    review_mode_note = (f"> 🔎 Deep review covered {agent_res.chunks_reviewed} of {agent_res.chunks_total} "
+                                        f"parts ({lookups} code lookups); the remaining files got the standard "
+                                        f"diff review ({reason}).")
+                    parts = ", ".join(str(k) for k in agent_res.failed_part_numbers)
+                    _alert(pr_context, f"agent_partial:{re.sub(r'[0-9]+', 'N', reason)}",
+                           "deep review partly fell back",
+                           f"Part(s) {parts} of {agent_res.chunks_total}: {reason}; their files got the diff review. "
+                           "Findings of the finished parts were posted.")
+                else:
+                    metrics.record_agentic("ok")
+                    review_mode_note = (f"> 🔎 Deep review: the AI checked the change against the repository "
+                                        f"({lookups} code lookups).")
+                extra_notes += _alert_agent_limits(pr_context, config, agent_res)
+                ai_results = agent_res
+            else:
                 logger.info("%s Step 2/2: AI review started", pr_tag)
                 ai_results, ai_incomplete_reason, ai_reviewed_nothing = _diff_ai_review(
-                    ai_reviewer, pr_context, config, deadline, file_contents, review_context, pr_tag)
+                    None, pr_context, config, deadline, file_contents, review_context, pr_tag)
         else:
             logger.info("%s Step 2/2: AI review skipped — disabled in config", pr_tag)
 
+        if static_future is not None:
+            semgrep_results, static_note = _join_static_analysis(static_future, deadline, pr_tag)
+            if static_note:
+                extra_notes.append(static_note)
+
     except SoftTimeLimitExceeded:
+        # Returned, not re-raised: a raise would reach on_task_failure, which overwrites the
+        # status with "Review failed". The lock is released by process_review's finally.
         duration_ms = round((time.monotonic() - review_start) * 1000)
-        logger.error("%s Soft time limit exceeded after %dms — recording failure", pr_tag, duration_ms)
+        logger.error("%s Soft time limit exceeded after %dms — marking the review stopped", pr_tag, duration_ms)
         metrics.record_review(
-            status="failure",
+            status="stopped",
             duration_ms=duration_ms,
             critical=0, bugs=0, perf=0, suggestions=0,
             semgrep_count=len(semgrep_results),
@@ -416,10 +447,13 @@ def _run_review(self, task_payload: dict) -> dict:
             author=pr_context.author,
         )
         try:
-            adapter.set_review_status(pr_context, "failure", "Review timed out")
+            adapter.set_review_status(pr_context, "stopped", "Not reviewed: task time limit reached")
         except Exception:
             pass
-        raise
+        return {"status": "stopped", "reason": "soft_time_limit"}
+    finally:
+        if static_pool is not None:
+            static_pool.shutdown(wait=False)  # Semgrep's own 120 s subprocess timeout bounds the thread
 
     findings = filter_by_config(merge_findings(semgrep_results, ai_results), config)
 
@@ -461,6 +495,9 @@ def _run_review(self, task_payload: dict) -> dict:
         notes.append(f"> ⚠️ AI review {scope}: {ai_incomplete_reason}.")
     if review_mode_note:
         notes.append(review_mode_note)
+    notes.extend(extra_notes)
+    if getattr(ai_results, "unverified", 0):
+        notes.append(f"> ℹ️ {ai_results.unverified} AI finding(s) were not double-checked (time limit).")
 
     summary_comment_id = ""
     if findings or notes:
@@ -544,6 +581,44 @@ def _agent_deadline(task_deadline: float | None, soft_limit: float | None) -> fl
     return agent_deadline
 
 
+def _static_analysis(config, pr_context: PRContext, adapter, file_contents, verify_deadline, pr_tag) -> list:
+    """Semgrep plus its AI verification; runs in a background thread next to the AI review.
+
+    Uses its own AIReviewer. The Celery soft-limit signal is never delivered to this
+    thread; Semgrep's subprocess timeout and the verification's read timeout bound it.
+    """
+    logger.info("%s Step 1/2: Static analysis started", pr_tag)
+    try:
+        results = SemgrepRunner(config).run(pr_context, adapter, file_contents=file_contents)
+        logger.info("%s Step 1/2: Static analysis complete — %d finding(s)", pr_tag, len(results))
+    except Exception as exc:
+        logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
+        return []
+    if results and config.semgrep_ai_verify:
+        logger.info("%s Step 1/2: Verifying %d semgrep finding(s) via AI", pr_tag, len(results))
+        try:
+            verified = AIReviewer(settings).verify_semgrep_findings(results, pr_context, deadline=verify_deadline)
+            logger.info("%s Step 1/2: Semgrep AI verification kept %d/%d finding(s)", pr_tag, len(verified), len(results))
+            metrics.record_semgrep_verification(kept=len(verified), total=len(results))
+            results = verified
+        except Exception as exc:
+            logger.error("%s Step 1/2: Semgrep AI verification failed, keeping unverified results — %s", pr_tag, exc)
+    return results
+
+
+def _join_static_analysis(future, deadline, pr_tag) -> tuple[list, str | None]:
+    """(Semgrep findings, summary note or None). Waits only until the time kept for posting."""
+    wait = None if deadline is None else max(_STATIC_JOIN_MIN_WAIT, deadline - _FINALIZE_RESERVE - time.monotonic())
+    try:
+        return future.result(timeout=wait), None
+    except FutureTimeout:
+        logger.error("%s Step 1/2: Static analysis did not finish in %.0fs — posting without it", pr_tag, wait or 0)
+        return [], "> ⚠️ Static analysis did not finish in time."
+    except Exception as exc:
+        logger.error("%s Step 1/2: Static analysis failed — %s", pr_tag, exc)
+        return [], "> ⚠️ Static analysis failed."
+
+
 def _diff_ai_review(ai_reviewer, pr_context: PRContext, config, deadline, file_contents, review_context, pr_tag):
     """The standard AI review. Returns (results, incomplete_reason, reviewed_nothing)."""
     try:
@@ -566,8 +641,9 @@ def _diff_ai_review(ai_reviewer, pr_context: PRContext, config, deadline, file_c
             _alert(pr_context, f"ai_incomplete:{stop_reason}", "AI review incomplete",
                    f"{incomplete_reason}: {ai_results.chunks_reviewed} of {ai_results.chunks_total} part(s) "
                    "of the diff reviewed.")
-    logger.info("%s Step 2/2: AI review complete — %d finding(s), %d dropped by verification",
-                pr_tag, len(ai_results), getattr(ai_results, "dropped_by_verification", 0))
+    logger.info("%s Step 2/2: AI review complete — %d finding(s), %d dropped by verification, %d unverified",
+                pr_tag, len(ai_results), getattr(ai_results, "dropped_by_verification", 0),
+                getattr(ai_results, "unverified", 0))
     return ai_results, incomplete_reason, reviewed_nothing
 
 
@@ -576,9 +652,10 @@ _LIMIT_ADVICE = {
               "Raise `agent_max_steps` for this repository in config/projects.yml if it keeps happening."),
     "tokens": ("used its token allowance for one review (`AGENT_MAX_TOKENS_PER_REVIEW`)",
                "Raise `AGENT_MAX_TOKENS_PER_REVIEW` in .env, or lower `agent_max_steps`."),
-    "time": ("ran out of time",
-             "Big PRs in this repository may need fewer `agent_max_steps` or `review_mode: diff`."),
 }
+# The time limit is expected on big PRs now that every part has a bounded window: it is a
+# metric and a summary note, not an alert
+_TIME_LIMIT_NOTE = "> ℹ️ The deep review stopped at its time limit; its findings so far are included."
 
 
 def _alert(pr_context: PRContext, kind: str, title: str, details: str) -> None:
@@ -590,12 +667,19 @@ def _alert(pr_context: PRContext, kind: str, title: str, details: str) -> None:
                f"{pr_ref} {pr_context.title}\n{details}")
 
 
-def _alert_agent_limits(pr_context: PRContext, config, ai_results) -> None:
+def _alert_agent_limits(pr_context: PRContext, config, ai_results) -> list[str]:
+    """Alerts for the steps/tokens limits; returns summary notes (the time limit)."""
+    notes = []
     for limit in sorted(getattr(ai_results, "limits_hit", ()) or ()):
+        metrics.record_agent_limit(limit)
+        if limit not in _LIMIT_ADVICE:
+            notes.append(_TIME_LIMIT_NOTE)
+            continue
         what, advice = _LIMIT_ADVICE[limit]
         _alert(pr_context, f"agent_limit:{limit}", "deep review stopped early",
                f"The agent {what.format(steps=config.agent_max_steps)} before it finished checking the change. "
                f"Its findings so far were posted. {advice}")
+    return notes
 
 
 def _remaining(deadline: float) -> float:
@@ -715,6 +799,7 @@ def process_shadow_review(self, task_payload: dict, posted: list[dict]) -> dict:
     payload = dict(task_payload)
     platform = payload.pop("platform")
     payload.pop("diff", None)
+    payload.pop("enqueued_at", None)
     pr_context = PRContext(platform=platform, diff="", **payload)
     pr_tag = f"[PR #{pr_context.pr_id} {pr_context.repo_full_name}] [shadow]"
     try:
@@ -735,7 +820,12 @@ def process_shadow_review(self, task_payload: dict, posted: list[dict]) -> dict:
         result = _agentic_review(adapter, pr_context, config, review_context, deadline, file_contents, raw_diff)
         agent_findings = filter_by_config(merge_findings([], list(result)), config)
         record.update(agent=_finding_dicts(agent_findings), tool_calls=getattr(result, "tool_calls", 0))
-        metrics.record_agentic("shadow_ok")
+        if getattr(result, "unreviewed_diff", ""):
+            # No diff fallback here: the record just says which share of the PR the agent covered
+            record["error"] = f"partial: {result.failed_parts} part(s): {result.failure_reason}"
+            metrics.record_agentic("shadow_partial")
+        else:
+            metrics.record_agentic("shadow_ok")
     except Exception as exc:  # SoftTimeLimitExceeded included: a shadow run never escalates
         record["error"] = exc.reason if isinstance(exc, AgentReviewFailed) else f"{type(exc).__name__}: {exc}"
         metrics.record_agentic("shadow_failed")

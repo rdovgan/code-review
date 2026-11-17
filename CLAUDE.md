@@ -39,6 +39,7 @@ app/
 │   └── factory.py            # get_adapter(platform, settings)
 ├── analyzers/
 │   ├── semgrep_runner.py     # Semgrep subprocess wrapper
+│   ├── ai_calls.py           # bounded requests: timeout from the deadline, retry policy, soft-limit unwrap
 │   ├── ai_reviewer.py        # Anthropic SDK, prompt loading, JSON parsing
 │   ├── agent_reviewer.py     # review_mode agentic: tool loop (GLM/OpenAI-compatible + Claude)
 │   └── merger.py             # dedup (file:line key) + severity sort
@@ -118,7 +119,7 @@ docker compose up --build
 | `stopped` build status when AI reviewed nothing | Budget/API failure must not look like a clean review; partial AI coverage keeps the normal status with a note |
 | Review lock: 5 min TTL, released by the worker | Collapses webhook bursts without blocking re-review of a follow-up push |
 | Prompt files as `.md`, not hardcoded | Prompt tuning without code deploys or restarts |
-| `ThreadPoolExecutor` in Celery | Semgrep is subprocess, Anthropic SDK is sync — asyncio adds complexity with no benefit |
+| Threads, not asyncio, in Celery | Semgrep is subprocess, the SDKs are sync — asyncio adds complexity with no benefit. Semgrep (+ its verify) runs in a background thread next to the AI review, agent parts run in a thread pool; diff chunks stay sequential (halving and the circuit breaker assume it) |
 | `task_acks_late=True` | Message stays in queue until task completes — prevents data loss on worker crash |
 | `worker_prefetch_multiplier=1` | Semgrep is CPU-heavy; one task per worker prevents resource contention |
 | `HTTP 202` from webhook handler | Never wait for analysis — guarantees <1 sec webhook response |
@@ -131,14 +132,19 @@ docker compose up --build
 | AI findings verified by a second AI pass (`ai_verify`) | The reviewer over-reports; a skeptical pass on the same material drops unproven findings. Fails open, and CRITICAL is dropped only with a concrete reason |
 | `review_mode` diff / agentic / shadow per repo, central config only | Roll the agentic review out repo by repo; `.codereview.yml` can't switch a repo to the costlier mode |
 | Agentic review falls back to diff review on any failure | A PR must never be left unreviewed because a clone, the model or the tool loop failed; the agent gets `_AGENTIC_EXTRA_SECONDS` on top so the fallback keeps the regular time budget |
+| Agent parts run in parallel in one window; a failed part's files get the diff review | One slow part used the whole window and the next part's failure threw away the first part's findings (PR #52). Finished parts keep their findings; only the rest is diff-reviewed, not the whole diff again. A part starts only if the answer reserve + `AGENT_MIN_TOOL_WINDOW_SECONDS` fit |
+| Every AI request has a read timeout derived from its deadline; the soft limit is only the backstop | Deadlines were checked only between requests and the SDK default was 600 s × 3 tries, so one request could outlive the task. `call_bounded` (`ai_calls.py`): no SDK retries, one own retry on 408/409/429/5xx when time allows, a request that cannot finish in time is not sent, a soft limit wrapped by the SDK is re-raised as `SoftTimeLimitExceeded` |
+| GLM final answer sent with thinking off (`GLM_ANSWER_THINKING=auto`, auto-detected) | glm-5.3-flash reasoned ~4 min before writing the final JSON; the lookups are done by then. A 400 that a resend without the parameter fixes, continued reasoning, or an answer that times out before thinking-off was ever confirmed flips the process to thinking-on with a 270 s reserve and one alert |
+| Soft time limit → `stopped`, never `failure` | A timeout says nothing about the code. The handler returns instead of re-raising, so `on_task_failure` cannot overwrite the status; hard = soft + 120 s leaves time to post |
+| Diff review: verification after coverage, CRITICAL chunks first | Verifying chunk by chunk spent the time on verification while later chunks went unreviewed. Unverified findings are kept (fail open) and counted in the summary |
 | Agent reads the server's `/opt/projects` snapshots, read-only, with the PR's changed files laid on top | No clones or history on disk; the folder is shared with docs generation and a cron, so the bot never fetches or checks out there. Repos not in it are not reviewed agentically |
 | Bot's own depth-1 clone for other target branches (`demo-dev`, …), re-cloned and swapped | The shared snapshot is the main branch only; a fresh shallow clone keeps no history and readers never see a half-written folder |
 | Own tool loop instead of an agent SDK | Must run on GLM (OpenAI-compatible) as well as Claude |
 | Agent sent back once if it answers with < `AGENT_MIN_TOOL_CALLS` lookups | Agentic exists to check the change against the code; an answer from the diff alone is just a pricier diff review |
 | Prompt caching in the agent loop; cache reads weighted in the budget (`AI_CACHED_TOKEN_WEIGHT`) | Each step re-sends the conversation; caching keeps depth affordable, and the budget should track cost, not raw tokens |
-| Operator alerts in the Mattermost channel, deduplicated in Redis (`alert:<kind>:<repo>`, `ALERT_REPEAT_HOURS`) | Limits and fallbacks only show up in logs otherwise; one message per repo and kind keeps the channel readable when every PR hits the same limit |
+| Operator alerts in the Mattermost channel, deduplicated in Redis (`alert:<kind>:<repo>`, `ALERT_REPEAT_HOURS`) | Limits and fallbacks only show up in logs otherwise; one message per repo and kind keeps the channel readable when every PR hits the same limit. The agent's time limit is a metric + summary note only: with bounded windows it is expected on big PRs |
 | Shadow review is a separate Celery task | It can fail or time out without touching the posted review's build status (the failure signals are bound to `process_review` only) |
-| Deadline taken at task start | Time spent fetching, in Semgrep and in the agent counts against the soft limit, so the fallback never runs past it |
+| Deadline taken at task start | Time spent fetching and in the agent counts against the soft limit, so the fallback never runs past it. Semgrep runs alongside and is joined before posting (up to the deadline minus `_FINALIZE_RESERVE`) |
 | Dynamic per-PR time limits + deadline-aware AI chunks | Bitbucket webhooks carry no file list, so limits scale by the real diffstat (fetched at enqueue); the AI chunk loop stops before the Celery soft limit and returns partial findings — the build status always gets finalized instead of the worker being SIGKILLed mid-review (stuck "in progress") |
 
 ## Roadmap
